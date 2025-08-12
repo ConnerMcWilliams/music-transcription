@@ -2,6 +2,7 @@ import torch
 import os, pickle
 from config import (SEED, DEVICE, MODEL_VARIANTS, RESULTS_DIR, POSW_PATH)
 from data import get_splits, make_loader
+from dataset.transforms import log_mel
 from losses import estimate_pos_weight
 from experiment import run_experiment
 from plotting import save_histories_csv, save_lr_csv, plot_losses, plot_lrs
@@ -45,7 +46,7 @@ def main():
     torch.manual_seed(SEED)
     torch.backends.cudnn.benchmark = True
 
-    train_ds, val_ds = get_splits()
+    train_ds, val_ds = get_splits(log_mel)
     print("Loading Train Data...")
     train_loader = make_loader(train_ds, train=True)
     print("Train Data Loaded!")

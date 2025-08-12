@@ -3,14 +3,14 @@ import torch.nn as nn
 from tqdm import tqdm
 from models.basic_CNN import BasicAMTCNN
 from config import (DEVICE, NUM_EPOCHS, RESULTS_DIR,
-                    SAMPLES_PER_CLIP, FRAMES_PER_CLIP)
+                    SAMPLES_PER_CLIP, FRAMES_PER_CLIP, N_MELS)
 from schedulers import make_optimizer, make_scheduler
 from losses import make_criterion, estimate_pos_weight
 
 def build_model(model_cfg):
     t = model_cfg["type"]
     if t == "BasicAMTCNN":
-        return BasicAMTCNN(SAMPLES_PER_CLIP, FRAMES_PER_CLIP)
+        return BasicAMTCNN(SAMPLES_PER_CLIP, n_frames=FRAMES_PER_CLIP, n_mels=N_MELS)
     else:
         raise ValueError(f"Unknown model type: {t}")
 

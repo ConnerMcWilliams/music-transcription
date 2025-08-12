@@ -36,3 +36,12 @@ def compare_piano_rolls_stacked(roll1, roll2, labels=('Roll 1', 'Roll 2')):
 
     plt.tight_layout()
     plt.show()
+    
+def display_spectrogram(spec) :
+    plt.figure(figsize=(10, 4))
+    plt.imshow(spec[0,:,:].numpy(), aspect='auto', origin='lower')
+    plt.title('Spectrogram (Torchaudio)')
+    plt.ylabel('Frequency Bin')
+    plt.xlabel('Time Frame')
+    plt.colorbar(label='Power (dB)')
+    plt.show()

@@ -2,11 +2,12 @@ import torch, os
 from torch.utils.data import DataLoader
 from models.basic_CNN import BasicAMTCNN
 from data import get_splits, make_loader
+from dataset.transforms import log_mel
 from losses import make_criterion
-from config import (SAMPLES_PER_CLIP, FRAMES_PER_CLIP, DEVICE, RESULTS_DIR)
+from config import (SAMPLES_PER_CLIP, FRAMES_PER_CLIP, DEVICE, RESULTS_DIR, N_MELS)
 from utils.best_and_worst import save_best_worst_plots, get_best_worst_examples
 
-MODEL_NAME = "Basic_ReduceOnPlateau_lr1e-3"
+MODEL_NAME = "Basic_OneCycle_max3e-3"
 
 def load_pos_weight_from_results():
     for fname in os.listdir(RESULTS_DIR):
@@ -15,7 +16,7 @@ def load_pos_weight_from_results():
     return None  # fine: the utility can handle None
 
 def load_model_by_name(name: str):
-    model = BasicAMTCNN(SAMPLES_PER_CLIP, FRAMES_PER_CLIP).to(DEVICE)
+    model = BasicAMTCNN(SAMPLES_PER_CLIP, n_frames=FRAMES_PER_CLIP, n_mels=N_MELS).to(DEVICE)
     state = torch.load(os.path.join(RESULTS_DIR, f"{name}.pth"), map_location=DEVICE)
     model.load_state_dict(state)
     model.eval()
@@ -23,10 +24,10 @@ def load_model_by_name(name: str):
 
 @torch.inference_mode()
 def evaluate_model(weights_path, pos_weight_path=None, threshold=0.5):
-    train_ds, val_ds = get_splits()
+    train_ds, val_ds = get_splits(log_mel)
     val_loader = make_loader(val_ds, train=False)
 
-    model = BasicAMTCNN(SAMPLES_PER_CLIP, FRAMES_PER_CLIP).to(DEVICE)
+    model = BasicAMTCNN(SAMPLES_PER_CLIP, n_frames=FRAMES_PER_CLIP, n_mels=N_MELS).to(DEVICE)
     state = torch.load(weights_path, map_location=DEVICE)
     model.load_state_dict(state)
     model.eval()
@@ -45,7 +46,7 @@ def evaluate_model(weights_path, pos_weight_path=None, threshold=0.5):
     
 def main():
     # Load validation data
-    _, val_ds = get_splits()
+    _, val_ds = get_splits(log_mel)
     val_loader = make_loader(val_ds, train=False)
 
     # Load pos_weight (if exists)

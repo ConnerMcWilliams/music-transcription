@@ -62,6 +62,8 @@ class MaestroDataset(Dataset):
             waveform = self.transform(waveform)
         if self.target_transform:
             piano_roll = self.target_transform(piano_roll)
+        
+        waveform = waveform.squeeze(0)
 
         return waveform, piano_roll
 

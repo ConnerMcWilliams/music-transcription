@@ -7,7 +7,6 @@ mel = torchaudio.transforms.MelSpectrogram(
     n_fft=N_FFT,
     hop_length=HOP_LENGTH,
     win_length=WIN_LENGTH,
-    window_fn=WINDOW_FN,
     power=POWER,                  
     center=True,
     pad_mode="reflect",
@@ -18,6 +17,6 @@ mel = torchaudio.transforms.MelSpectrogram(
     norm="slaney"               
 )
 
-def logmel(waveform):
+def log_mel(waveform):
     S = mel(waveform)          # [B, n_mels, T]
     return torch.log(S + LOG_OFFSET)  # or torch.log1p(S) if you prefer
