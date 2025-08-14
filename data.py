@@ -1,6 +1,6 @@
 import pandas as pd
 from torch.utils.data import DataLoader
-from dataset.dataset import MaestroDataset
+from dataset.dataset import MaestroDataset, MaestroDatasetWithWindowing
 from config import CSV_PATH, MAESTRO_ROOT, BATCH_SIZE, NUM_WORKERS, PIN_MEMORY, DROP_LAST_TRAIN
 
 def get_splits(transform):
@@ -13,8 +13,8 @@ def get_splits(transform):
         ((metadata['year'] == 2018) | (metadata['year'] == 2017)) &
         (metadata['split'] == 'validation')
     ]
-    return (MaestroDataset(train_split, MAESTRO_ROOT, transform=transform),
-            MaestroDataset(val_split,   MAESTRO_ROOT, transform=transform))
+    return (MaestroDatasetWithWindowing(train_split, MAESTRO_ROOT, transform=transform),
+            MaestroDatasetWithWindowing(val_split,   MAESTRO_ROOT, transform=transform))
 
 def make_loader(dataset, train=True):
     return DataLoader(

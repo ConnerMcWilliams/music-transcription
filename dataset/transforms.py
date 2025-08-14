@@ -10,6 +10,7 @@ mel = torchaudio.transforms.MelSpectrogram(
     power=POWER,                  
     center=True,
     pad_mode="reflect",
+    window_fn=torch.hann_window,
     n_mels=N_MELS,
     f_min=F_MIN,
     f_max=F_MAX,

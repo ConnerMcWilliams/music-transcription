@@ -8,7 +8,7 @@ CSV_PATH = os.path.join(MAESTRO_ROOT, "maestro-v3.0.0.csv")
 SAMPLES_PER_CLIP = 80_000
 FRAMES_PER_CLIP  = 500
 FRAME_RATE = 100
-BATCH_SIZE       = 8
+BATCH_SIZE       = 4
 NUM_WORKERS      = 6          # set 0 in notebooks/IDEs on Windows
 DROP_LAST_TRAIN  = True
 PIN_MEMORY       = True
@@ -26,7 +26,7 @@ POWER           = 2.0        # magnitude^2 (torchaudio default)
 LOG_OFFSET      = 1e-6       # eps for log scaling
 
 # Training
-NUM_EPOCHS       = 15
+NUM_EPOCHS       = 5
 WEIGHT_DECAY     = 1e-4
 SEED             = 0
 
@@ -40,7 +40,7 @@ MODEL_VARIANTS = [
     {
         "name": "Basic_OneCycle_max3e-3",
         "model": {"type": "BasicAMTCNN"},
-        "optimizer": {"type": "AdamW", "lr": 3e-3},
+        "optimizer": {"type": "AdamW", "lr": 6e-3},
         "scheduler": {"type": "onecycle"},
     },
     {
