@@ -153,8 +153,6 @@ class MaestroDatasetWithWindowing(Dataset) :
             wav = self.transform(wav)
         if self.target_transform:
             roll_win = self.target_transform(roll_win)
-            
-        wav = wav.squeeze(0)
 
         return wav, roll_win
     

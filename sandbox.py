@@ -16,7 +16,7 @@ def main() :
     
     pos_w = load_or_compute_pos_weight(train_loader=train_loader)
 
-    run_experiment(train_loader=train_loader, val_loader=val_loader, variant=MODEL_VARIANTS[0], pos_weight_vec=pos_w)
+    run_experiment(train_loader=train_loader, val_loader=val_loader, variant=MODEL_VARIANTS[3], pos_weight_vec=pos_w)
 
 if __name__ == "__main__" :
     main()

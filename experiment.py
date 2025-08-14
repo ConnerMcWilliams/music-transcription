@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from models.basic_CNN import BasicAMTCNN
+from models.basic_transformer import BasicTransformerAMT
 from config import (DEVICE, NUM_EPOCHS, RESULTS_DIR,
                     SAMPLES_PER_CLIP, FRAMES_PER_CLIP, N_MELS)
 from schedulers import make_optimizer, make_scheduler
@@ -11,6 +12,8 @@ def build_model(model_cfg):
     t = model_cfg["type"]
     if t == "BasicAMTCNN":
         return BasicAMTCNN(SAMPLES_PER_CLIP, n_frames=FRAMES_PER_CLIP, n_mels=N_MELS)
+    elif t == "BasicAMTTransformer" :
+        return BasicTransformerAMT(FRAMES_PER_CLIP, 16, 10, 256, 4, mlp_ratio=2.0, dropout=0.1)
     else:
         raise ValueError(f"Unknown model type: {t}")
 

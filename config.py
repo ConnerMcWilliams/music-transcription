@@ -55,4 +55,10 @@ MODEL_VARIANTS = [
         "optimizer": {"type": "AdamW", "lr": 1e-3},
         "scheduler": {"type": "plateau"},
     },
+    {
+        "name": "Transformer_OneCycle_max3e-3",
+        "model": {"type": "BasicAMTTransformer"},
+        "optimizer": {"type": "AdamW", "lr": 3e-3},
+        "scheduler": {"type": "onecycle"},
+    }
 ]

@@ -7,7 +7,7 @@ from losses import make_criterion
 from config import (SAMPLES_PER_CLIP, FRAMES_PER_CLIP, DEVICE, RESULTS_DIR, N_MELS)
 from utils.best_and_worst import save_best_worst_plots, get_best_worst_examples
 
-MODEL_NAME = "Basic_OneCycle_max3e-3"
+MODEL_NAME = "Transformer_OneCycle_max3e-3"
 
 def load_pos_weight_from_results():
     for fname in os.listdir(RESULTS_DIR):
