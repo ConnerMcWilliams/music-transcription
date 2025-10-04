@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
-from typing import Optional
 from torch import Tensor
-from config import (BATCH_SIZE, EMBED_DIM)
+from typing import Optional
+import torch.nn.functional as F
+from config import (SUBDIVISIONS_PER_BEAT, BEATS_PER_CLIP, BATCH_SIZE, N_MELS)
 
 #d_model = dimensions of each embedding
 class PatchEmbed2D(nn.Module):
@@ -85,28 +86,29 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:T].unsqueeze(0)
 
 
-class BasicTransformerAMT(nn.Module) :
-    def __init__(self:"BasicTransformerAMT", 
+class OnsetAndFrames(nn.Module) :
+    def __init__(self:"OnsetAndFrames", 
                  d_model:int, 
                  n_heads:int, 
                  mlp_ratio:float=2.0, 
                  dropout:float=0.1, 
                  n_layers:int=1, 
                  n_notes:int=128) :
-        super(BasicTransformerAMT, self).__init__() # type: ignore[call-arg]
-        self.patch = PatchEmbed2D()
+        super(OnsetAndFrames, self).__init__() # type: ignore[call-arg]
+        kernel = SUBDIVISIONS_PER_BEAT
+        self.patch = PatchEmbed2D(kernel_t=kernel)
         self.pos = PositionalEncoding(d_model)
         self.layers = nn.ModuleList([
             EncoderLayer(d_model, n_heads, mlp_ratio=mlp_ratio, dropout=dropout)
             for _ in range(n_layers)
         ])
-        self.head = nn.Linear(d_model, n_notes)
+        self.onsetHead = nn.Linear(d_model, n_notes)
         
     def forward(self, mel_db: Tensor) -> Tensor:
+        #The first layer takes in the spectrogram and splits it into patches using a CNN. 
         x = self.patch(mel_db)           # [B, N, D]
         x = self.pos(x)
         for layer in self.layers:
             x = layer(x)                 # [B, N, D]
-        logits = self.head(x)            # [B, N, 128]
-        # If patch_t>1, N != T; you'll need to map tokens back to frames, e.g. repeat/upsample or design patch_t=1.
+        logits = self.onsetHead(x)            # [B, N, 128]
         return logits

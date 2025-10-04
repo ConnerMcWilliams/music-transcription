@@ -1,13 +1,14 @@
 import torch
 import os, pickle
-from config import (SEED, DEVICE, MODEL_VARIANTS, RESULTS_DIR, POSW_PATH)
+from config import (SEED, MODEL_VARIANTS, POSW_PATH)
 from data import get_splits, make_loader
 from dataset.transforms import log_mel
 from losses import estimate_pos_weight
 from experiment import run_experiment
 from plotting import save_histories_csv, save_lr_csv, plot_losses, plot_lrs
+from torch import Tensor
 
-def _safe_torch_load(path):
+def _safe_torch_load(path: str):
     """Load with map_location='cpu' and try weights_only=True if supported."""
     kwargs = {"map_location": "cpu"}
     # weights_only is available in newer PyTorch; try it, fall back if not
@@ -16,7 +17,10 @@ def _safe_torch_load(path):
     except TypeError:
         return torch.load(path, **kwargs)
 
-def load_or_compute_pos_weight(train_loader, path=POSW_PATH, max_batches=100, force=False):
+def load_or_compute_pos_weight(train_loader, path:str=POSW_PATH, max_batches:int=100, force:bool=False) -> Tensor :
+    """
+    If pos_weights is already created, it uses the existing one. If not, it creates a new one and returns that.
+    """
     should_compute = force or (not os.path.isfile(path)) or os.path.getsize(path) == 0
     if not should_compute:
         try:
@@ -43,6 +47,9 @@ def load_or_compute_pos_weight(train_loader, path=POSW_PATH, max_batches=100, fo
 
 
 def main():
+    """
+    Runs three models and saves and plots the losses and the learning rates over time.
+    """
     torch.manual_seed(SEED)
     torch.backends.cudnn.benchmark = True
 

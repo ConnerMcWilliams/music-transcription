@@ -4,6 +4,9 @@ from dataset.dataset import MaestroDataset, MaestroDatasetWithWindowing
 from config import CSV_PATH, MAESTRO_ROOT, BATCH_SIZE, NUM_WORKERS, PIN_MEMORY, DROP_LAST_TRAIN
 
 def get_splits(transform):
+    """
+    Return the splits from 2017 and 2018
+    """
     metadata = pd.read_csv(CSV_PATH)
     train_split = metadata[
         ((metadata['year'] == 2018) | (metadata['year'] == 2017)) &
@@ -17,6 +20,7 @@ def get_splits(transform):
             MaestroDatasetWithWindowing(val_split,   MAESTRO_ROOT, transform=transform))
 
 def make_loader(dataset, train=True):
+    """Returns a dataloader with the settings from the config.py file."""
     return DataLoader(
         dataset,
         batch_size=BATCH_SIZE,

@@ -45,3 +45,15 @@ def display_spectrogram(spec) :
     plt.xlabel('Time Frame')
     plt.colorbar(label='Power (dB)')
     plt.show()
+    
+def display_spectrogram_with_beat(spec, beats, subdivisions) :
+    plt.figure(figsize=(10, 4))
+    plt.imshow(spec[0,:,:].numpy(), aspect='auto', origin='lower')
+    plt.title('Spectrogram (Torchaudio)')
+    plt.ylabel('Frequency Bin')
+    plt.xlabel('Beats')
+    plt.colorbar(label='Power (dB)')
+    custom_tick_locations = [i * subdivisions for i in range(0, beats)]
+    custom_tick_labels = [i for i in range(0, beats)]
+    plt.xticks(custom_tick_locations, custom_tick_labels)
+    plt.show()
