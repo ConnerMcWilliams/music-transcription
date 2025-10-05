@@ -21,10 +21,10 @@ mel = torchaudio.transforms.MelSpectrogram(
 )
 
 def log_mel(waveform):
-    S = mel(waveform)          # [B, n_mels, T]
-    return torch.log(S + LOG_OFFSET)  # or torch.log1p(S) if you prefer
+    S = mel(waveform)          # [1, n_mels, T]
+    return torch.log(S + LOG_OFFSET).squeeze(0)  # or torch.log1p(S) if you prefer
 
-def linear_time_warp_mel(mel_time: torch.Tensor, ts_target: torch.Tensor, sr: int, hop_length: int) -> torch.Tensor:
+def linear_time_warp_mel(mel_time: torch.Tensor, ts_target: torch.Tensor, dt: float) -> torch.Tensor:
     """
     mel_time: [n_mels, T] time-domain mel spectrogram
     ts_target: [L] desired times in seconds to sample (monotone increasing)
@@ -32,7 +32,7 @@ def linear_time_warp_mel(mel_time: torch.Tensor, ts_target: torch.Tensor, sr: in
     """
     # time of each mel frame center (seconds)
     T = mel_time.shape[-1]
-    frame_times = torch.arange(T, dtype=torch.float32, device=mel_time.device) * (hop_length / sr)
+    frame_times = torch.arange(T, dtype=torch.float32, device=mel_time.device) * (dt)
 
     # For each target time, find bracketing indices
     idx1 = torch.searchsorted(frame_times, ts_target.clamp(max=float(frame_times[-1])), right=False)
