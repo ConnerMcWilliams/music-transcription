@@ -1,5 +1,6 @@
 # dataset_beats.py
 import os
+import numpy as np
 from typing import Optional, Callable, Tuple, Dict, Any
 
 import torch
@@ -108,70 +109,77 @@ class MaestroDatasetWithWindowingInBeats(Dataset):
         pm = PrettyMIDI(midi_path)
         beats, _ = get_beats_and_downbeats(pm)
         num_beats = self.beats_per_window
-        L = num_beats * self.S
+        L = num_beats * self.S  # self.S = subdivisions per beat
 
-        ts_target = build_subdivision_times(beats, self.S, start_beat_idx, num_beats)  # [L] in seconds
+        ts_target = build_subdivision_times(beats, self.S, start_beat_idx, num_beats)  # [L] seconds
         if ts_target is None:
-            # Degenerate; return empties with shapes intact
-            empty_mel = torch.zeros(self.n_mels, L)
-            empty = {'on': torch.zeros(128, L), 'off': torch.zeros(128, L), 'frame': torch.zeros(128, L)}
-            meta = {'sr': None, 'hop_length': None, 'beats': None, 'subs_per_beat': self.S,
-                    'start_beat_idx': start_beat_idx}
-            return empty_mel.unsqueeze(0), empty, meta
+            mel = torch.zeros(1, self.n_mels, L, dtype=torch.float32)
+            zeros = torch.zeros(L, 128, dtype=torch.float32)  # [L, P]
+            labels = {"on": zeros.clone(), "off": zeros.clone(), "frame": zeros.clone()}
+            meta = {"sr": None, "hop_length": None, "beats": None,
+                "subs_per_beat": self.S, "start_beat_idx": start_beat_idx}
+            return mel, labels, meta
 
-        # ---- load audio (mono), optional resample ----
+        # ---- audio (mono) ----
         waveform, sr = torchaudio.load(audio_path)  # [C, N]
         if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
+            waveform = waveform.mean(dim=0, keepdim=True)  # [1, N]
         if self.sr_target is not None and self.sr_target != sr:
             waveform = torchaudio.functional.resample(waveform, sr, self.sr_target)
             sr = self.sr_target
-
-        # ---- optional waveform-domain augmentation (no timing changes) ----
         if self.waveform_tx is not None:
-            waveform = self.waveform_tx(waveform)  # [1, N]
+            waveform = self.waveform_tx(waveform)
 
-        # ---- mel in time, then (optional) mel-domain pre-warp aug ----
-        mel_time = self.mel_tx(waveform)  # [n_mels, T], int
+        # ---- log-mel in time -> beat grid ----
+        mel_time = self.mel_tx(waveform)  # expect [n_mels, T] float
         if mel_time.shape[0] != self.n_mels:
             raise ValueError(f"mel_tx returned {mel_time.shape[0]} mels, expected {self.n_mels}")
         if self.mel_aug_prewarp is not None:
-            mel_time = self.mel_aug_prewarp(mel_time)     # [n_mels, T]
+            mel_time = self.mel_aug_prewarp(mel_time)
 
-        # ---- tempo normalization: time → beat grid ----
         mel_beat = linear_time_warp_mel(mel_time, ts_target, self.dt)  # [n_mels, L]
         if mel_beat.shape != (self.n_mels, L):
             raise RuntimeError(f"mel_beat has shape {tuple(mel_beat.shape)}, expected ({self.n_mels}, {L})")
-
-        # ---- optional beat-domain augmentation ----
         if self.mel_aug_postwarp is not None:
-            mel_beat = self.mel_aug_postwarp(mel_beat)    # [n_mels, L]
+            mel_beat = self.mel_aug_postwarp(mel_beat)
 
         # ---- labels on the same beat grid ----
-        on_b, off_b, frm_b = midi_notes_to_beat_labels(pm, beats, self.S, start_beat_idx, num_beats)  # [128, L]
-        if self.target_transform is not None:
-            on_b  = self.target_transform(on_b)
-            off_b = self.target_transform(off_b)
-            frm_b = self.target_transform(frm_b)
-        labels = {'on': on_b, 'off': off_b, 'frame': frm_b}
+        # NOTE: many utilities return labels as [P, L]; we transpose to [L, P]
+        on_b, off_b, frm_b = midi_notes_to_beat_labels(pm, beats, self.S, start_beat_idx, num_beats)  # e.g. [128, L]
+        on_t  = torch.as_tensor(on_b,  dtype=torch.float32)
+        off_t = torch.as_tensor(off_b, dtype=torch.float32)
+        frm_t = torch.as_tensor(frm_b, dtype=torch.float32)
 
-        # ---- (optional) also return time-space roll for auxiliary losses ----
+        if on_t.shape == (128, L):  # transpose to [L, 128]
+            on_t  = on_t.transpose(0, 1)
+            off_t = off_t.transpose(0, 1)
+            frm_t = frm_t.transpose(0, 1)
+        elif on_t.shape != (L, 128):
+            raise RuntimeError(f"Expected targets [L, 128], got {tuple(on_t.shape)}")
+
+        if self.target_transform is not None:
+            on_t  = self.target_transform(on_t)
+            off_t = self.target_transform(off_t)
+            frm_t = self.target_transform(frm_t)
+
+        # ---- optional time-space roll ----
+        labels = {"on": on_t, "off": off_t, "frame": frm_t}
         if self.return_time_labels:
             if self.time_roll_rate is None:
                 raise ValueError("Set time_roll_rate when return_time_labels=True.")
             roll_t = torch.tensor(pm.get_piano_roll(fs=self.time_roll_rate), dtype=torch.float32)  # [128, T_time]
-            labels['time_roll'] = roll_t
+            labels["time_roll"] = roll_t
 
-        # ---- meta for possible unwarping back to seconds later ----
-        beats_window = torch.tensor(beats[start_beat_idx:start_beat_idx+num_beats+1], dtype=torch.float32)
+        # ---- meta ----
+        beats_window = torch.tensor(beats[start_beat_idx:start_beat_idx + num_beats + 1], dtype=torch.float32)
         meta = {
-            'sr': sr,
-            'hop_length': self.hop_length,
-            'beats': beats_window,       # beat boundaries (seconds) for this window
-            'subs_per_beat': self.S,
-            'start_beat_idx': start_beat_idx
+            "sr": sr,
+            "hop_length": self.hop_length,
+            "beats": beats_window,
+            "subs_per_beat": self.S,
+            "start_beat_idx": start_beat_idx,
         }
 
-        # Return mel as [1, n_mels, L] for 2D models (in_channels=1)
-        mel_beat = mel_beat.unsqueeze(0)  # -> [1, n_mels, L]
-        return mel_beat, labels, meta
+        # model expects [1, n_mels, L] (channel=1)
+        mel = mel_beat.to(torch.float32).unsqueeze(0)
+        return mel, labels, meta

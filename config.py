@@ -63,30 +63,6 @@ class VariantConfig(TypedDict):
 # Experiment set (name -> dict of model/scheduler configs)
 MODEL_VARIANTS = [
     {
-        "name": "Basic_OneCycle_max3e-3",
-        "model": {"type": "BasicAMTCNN"},
-        "optimizer": {"type": "AdamW", "lr": 6e-3},
-        "scheduler": {"type": "onecycle"},
-    },
-    {
-        "name": "Basic_CosineWarmup_max1e-3",
-        "model": {"type": "BasicAMTCNN"},
-        "optimizer": {"type": "AdamW", "lr": 1e-3},
-        "scheduler": {"type": "cosine_warmup"},
-    },
-    {
-        "name": "Basic_ReduceOnPlateau_lr1e-3",
-        "model": {"type": "BasicAMTCNN"},
-        "optimizer": {"type": "AdamW", "lr": 1e-3},
-        "scheduler": {"type": "plateau"},
-    },
-    {
-        "name": "Transformer_OneCycle_max3e-3",
-        "model": {"type": "BasicAMTTransformer"},
-        "optimizer": {"type": "AdamW", "lr": 3e-3},
-        "scheduler": {"type": "onecycle"},
-    },
-    {
         "name": "OAF_max3e-3",
         "model": {"type": "OnsetAndFrames"},
         "optimizer": {"type": "AdamW", "lr": 3e-3},

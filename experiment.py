@@ -12,28 +12,36 @@ from models.onset_and_frames import OnsetAndFrames
 
 def build_model(model_cfg):
     t = model_cfg["type"]
-    if t == "BasicAMTCNN":
-        return BasicAMTCNN(SAMPLES_PER_CLIP, n_frames=FRAMES_PER_CLIP, n_mels=N_MELS)
-    elif t == "OnsetAndFrames" :
+    if t == "OnsetAndFrames" :
         return OnsetAndFrames(d_model=256, n_heads=8)
-    elif t == "BasicAMTTransformer" :
-        return BasicTransformerAMT(FRAMES_PER_CLIP, 16, 10, 256, 4, mlp_ratio=2.0, dropout=0.1)
     else:
         raise ValueError(f"Unknown model type: {t}")
+    
+LABEL_KEYS = ("on", "off", "frame", "vel")
 
-def train_one_epoch(model, loader, criterion, optimizer, scheduler=None, step_per_batch=True):
+def train_one_epoch(model, loader, criterion, optimizer, scheduler=None, step_per_batch=True, device=DEVICE):
     model.train()
     total = 0.0
     lr_track = []
-    for x, labels, meta in tqdm(loader, leave=False, desc="train"):
-        y = labels['on']
-        y = (y.permute(0,2,1) > 0).float().to(DEVICE, non_blocking=True)
-        x = x.to(DEVICE, non_blocking=True)
+
+    for step, (x, labels) in enumerate(tqdm(loader, leave=False, desc="train")):
+        # Move input
+        x = x.to(device, dtype=torch.float32, non_blocking=True)
+
+        # Move/prepare label dict WITHOUT permuting
+        y = {}
+        for k in LABEL_KEYS:
+            if k in labels:
+                v = labels[k]
+                # Accept [L,128] or [B,L,128]; normalize to [B,L,128]
+                if v.dim() == 2:
+                    v = v.unsqueeze(0)
+                y[k] = v.to(device, dtype=torch.float32, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        out = model(x)
-        assert out.shape == y.shape, (out.shape, y.shape)
-        loss = criterion(out, y)
+
+        out = model(x)                           # dict: {'on','off','frame',(optional 'vel')}
+        loss, _metrics = criterion(out, y)       # <-- pass the dict, not a tensor
         loss.backward()
         optimizer.step()
 
@@ -41,16 +49,28 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None, step_pe
             scheduler.step()
 
         lr_track.append(optimizer.param_groups[0]["lr"])
-        total += loss.item()
-    return total / max(1, len(loader)), lr_track
+        total += loss.item() * x.size(0)
+
+    avg_loss = total / max(1, len(loader.dataset))
+    return avg_loss, lr_track
 
 @torch.inference_mode()
-def eval_one_epoch(model, loader, criterion):
+def eval_one_epoch(model, loader, criterion, device=DEVICE):
     model.eval()
     total = 0.0
-    for x, y in tqdm(loader, leave=False, desc="valid"):
-        y = (y.permute(0,2,1) > 0).float().to(DEVICE, non_blocking=True)
-        x = x.to(DEVICE, non_blocking=True)
+    for step, (x, labels) in tqdm(loader, leave=False, desc="valid"):
+        # Move input
+        x = x.to(device, dtype=torch.float32, non_blocking=True)
+        # Move/prepare label dict WITHOUT permuting
+        y = {}
+        for k in LABEL_KEYS:
+            if k in labels:
+                v = labels[k]
+                # Accept [L,128] or [B,L,128]; normalize to [B,L,128]
+                if v.dim() == 2:
+                    v = v.unsqueeze(0)
+                y[k] = v.to(device, dtype=torch.float32, non_blocking=True)
+                
         out = model(x)
         loss = criterion(out, y)
         total += loss.item()
@@ -60,18 +80,11 @@ def run_experiment(train_loader, val_loader, variant, pos_weight_vec=None):
     # Build model
     model = build_model(variant["model"]).to(DEVICE)
 
-    # Optional: bias init from base rate
-    if pos_weight_vec is not None and hasattr(model, "fc") and hasattr(model.fc, "bias"):
-        with torch.no_grad():
-            p_k = 1.0 / (1.0 + pos_weight_vec)
-            bias = torch.log(p_k / (1.0 - p_k))
-            model.fc.bias.copy_(bias.to(DEVICE))
-
     # Optimizer & scheduler
     opt = make_optimizer(variant["optimizer"]["type"], model.parameters(), variant["optimizer"]["lr"])
     scheduler, step_per_batch = make_scheduler(variant["scheduler"]["type"], opt, len(train_loader))
 
-    crit = make_criterion(pos_weight_vec)
+    crit = make_criterion()
 
     train_hist, val_hist, lr_hist = [], [], []
 
