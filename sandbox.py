@@ -173,12 +173,7 @@ def main() :
     model = OnsetAndFrames(d_model=256, n_heads=8).to(device=DEVICE)
     
     opt = optim.Adam(model.parameters())
-    criterion = OnsetsAndFramesLoss(pos_weight_on=None, pos_weight_off = None, pos_weight_frame=None)
-    
-    print("pw_on:", criterion.pw_on)
-    print("pw_frm:", criterion.pw_frm)
-    print("pw_off:", criterion.pw_off)
-
+    criterion = OnsetsAndFramesLoss(pos_weight_on=None, pos_weight_off = None, pos_weight_frame=None)\
     
     for epoch in range(NUM_EPOCHS):
         tr, lr_track = train_one_epoch(model, train_loader, criterion, opt)
