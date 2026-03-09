@@ -111,7 +111,8 @@ class OnsetAndFrames(nn.Module) :
                  n_layers:int=1, 
                  n_notes:int=128,
                  smooth_k: int = 5,
-                 detach_condition: bool = True) :
+                 detach_condition: bool = True,
+                 head_hidden_size: int = 512) :
         super(OnsetAndFrames, self).__init__() # type: ignore[call-arg]
         kernel = SUBDIVISIONS_PER_BEAT
         self.patch = PatchEmbed2D(kernel_t=kernel)
@@ -121,17 +122,42 @@ class OnsetAndFrames(nn.Module) :
             for _ in range(n_layers)
         ])
         
-        # --- heads (logits) ---
-        self.onset_head  = nn.Linear(d_model, n_notes)
-        self.offset_head = nn.Linear(d_model, n_notes)
-        self.frame_head  = nn.Linear(d_model, n_notes)
+        # --- heads (logits) with additional linear layers ---
+        self.onset_head  = nn.Sequential(
+            nn.Linear(d_model, head_hidden_size),
+            nn.ReLU(),
+            nn.Linear(head_hidden_size, n_notes)
+        )
+        self.offset_head = nn.Sequential(
+            nn.Linear(d_model, head_hidden_size),
+            nn.ReLU(),
+            nn.Linear(head_hidden_size, n_notes)
+        )
+        self.frame_head  = nn.Sequential(
+            nn.Linear(d_model + n_notes, head_hidden_size),
+            nn.ReLU(),
+            nn.Linear(head_hidden_size, n_notes)
+        )
         
         # --- conditioning from on/off into frame ---
         self.on_smooth  = DepthwiseTimeSmoother(pitches=n_notes, k=smooth_k)
         self.off_smooth = DepthwiseTimeSmoother(pitches=n_notes, k=smooth_k)
-        self.alpha_on   = nn.Parameter(torch.tensor(1.0))
-        self.alpha_off  = nn.Parameter(torch.tensor(0.5))
+        self.alpha_on   = nn.Parameter(torch.tensor(0.1))  # Reduced from 1.0
+        self.alpha_off  = nn.Parameter(torch.tensor(0.05))  # Reduced from 0.5
         self.detach_condition = detach_condition
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.xavier_uniform_(module.weight, gain=1.0)
+            if module.bias is not None:
+                torch.nn.init.constant_(module.bias, 0.0)
+        elif isinstance(module, nn.Conv2d):
+            torch.nn.init.xavier_uniform_(module.weight, gain=1.0)
+            if module.bias is not None:
+                torch.nn.init.constant_(module.bias, 0.0)
         
     def forward(self, mel_db: Tensor) -> Tensor:
         #The first layer takes in the spectrogram and splits it into patches using a CNN. 
@@ -142,18 +168,20 @@ class OnsetAndFrames(nn.Module) :
         
         on_logits  = self.onset_head(x)     # [B, L, 128]
         off_logits = self.offset_head(x)    # [B, L, 128]
-        frm_base   = self.frame_head(x)     # [B, L, 128]
 
         # Use onset/offset probs as features for frames
-        on_prob  = torch.sigmoid(on_logits)
-        off_prob = torch.sigmoid(off_logits)
+        on_prob  = torch.sigmoid(on_logits).clamp(0, 1)
+        off_prob = torch.sigmoid(off_logits).clamp(0, 1)
         if self.detach_condition:
             on_prob  = on_prob.detach()
             off_prob = off_prob.detach()
 
         on_ctx  = self.on_smooth(on_prob)   # [B, L, 128]
         off_ctx = self.off_smooth(off_prob) # [B, L, 128]
+        
+        frame_input = torch.cat([x, on_ctx], dim=-1)  # [B, L, D+128]
+        frm_base = self.frame_head(frame_input)  # [B+125, L, 128]
 
-        frame_logits = frm_base + self.alpha_on * on_ctx + self.alpha_off * off_ctx
+        frame_logits = frm_base + self.alpha_off * off_ctx
 
         return {"on": on_logits, "off": off_logits, "frame": frame_logits}

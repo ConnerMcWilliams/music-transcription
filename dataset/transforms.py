@@ -6,6 +6,9 @@ from typing import Tuple
 import torch
 import torchaudio
 
+import bisect
+import numpy as np
+
 from config import (
     SAMPLE_RATE,
     N_FFT,
@@ -97,17 +100,20 @@ def linear_time_warp_mel(
     returns:
         mel_beat: [n_mels, L] via linear interpolation in time
     """
+    # Gets the time domain size
     T = mel_time.shape[-1]
     device = mel_time.device
 
+    # Creates a tensor that has the frame times: [0, dt, dt*2, dt*3, ...]
     frame_times = torch.arange(
         T, dtype=torch.float32, device=device
     ) * dt  # [T] seconds
 
-    # clamp targets so searchsorted doesn't go OOB
+    # Ensure ts_target is on the same device
     ts_target = ts_target.to(device=device, dtype=torch.float32)
     ts_target = ts_target.clamp(max=float(frame_times[-1]))
-
+    
+    # searchsorted (keep on device)
     idx1 = torch.searchsorted(frame_times, ts_target, right=False)
     idx0 = (idx1 - 1).clamp(min=0)
     idx1 = idx1.clamp(max=T - 1)
@@ -125,14 +131,15 @@ def linear_time_warp_mel(
 
 def midi_notes_to_beat_labels(
     pm,
-    beats,
+    ts_target, # of length L
     S: int,
-    start_beat_idx: int,
+    max_value: int,
     num_beats: int,
     num_pitches: int = 128
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert PrettyMIDI notes to on/off/frame label matrices on a beat-synchronous grid.
+    Optimized with vectorized searchsorted operations and proper nearest-neighbor rounding.
 
     returns:
         on  [num_pitches, L]
@@ -145,39 +152,94 @@ def midi_notes_to_beat_labels(
     off = torch.zeros_like(on)
     frm = torch.zeros_like(on)
 
-    # inner helper: map absolute time -> subdivision index in our window
-    def time_to_subidx(t: float):
-        # find beat segment k where beats[k] <= t < beats[k+1]
-        k = int(torch.searchsorted(torch.tensor(beats), torch.tensor(t), right=True).item()) - 1
-        if k < start_beat_idx or k >= start_beat_idx + num_beats:
-            return None
-        k_local = k - start_beat_idx
-        t0, t1 = float(beats[k]), float(beats[k+1])
-        if t1 <= t0:
-            sub = 0
-        else:
-            frac = (t - t0) / (t1 - t0)
-            sub = int(min(S-1, max(0, math.floor(frac * S))))
-        return k_local * S + sub
-
+    # Ensure ts_target is a torch tensor on CPU
+    if not isinstance(ts_target, torch.Tensor):
+        ts_target = torch.tensor(ts_target, dtype=torch.float32)
+    elif ts_target.device.type != 'cpu':
+        ts_target = ts_target.cpu()
+    
+    # Collect all notes from non-drum instruments
+    all_notes = []
     for inst in pm.instruments:
         if inst.is_drum:
             continue
         for note in inst.notes:
             p = int(note.pitch)
-            i_on = time_to_subidx(note.start)
-            i_off = time_to_subidx(note.end)
-
-            if i_on is not None:
-                on[p, i_on] = 1.0
-                frm[p, i_on] = 1.0  # frame is active starting at onset
-
-            if i_off is not None:
-                off[p, i_off] = 1.0
-
-            if (i_on is not None) and (i_off is not None):
-                a, b = sorted((i_on, i_off))
-                frm[p, a:b+1] = 1.0
-            # else: sustain until we lose it – this is already handled partially above
+            if 0 <= p < num_pitches:
+                all_notes.append((note.start, note.end, p))
+    
+    if not all_notes:
+        return on, off, frm
+    
+    # Convert to tensors
+    note_starts = torch.tensor([n[0] for n in all_notes], dtype=torch.float32)
+    note_ends = torch.tensor([n[1] for n in all_notes], dtype=torch.float32)
+    pitches = torch.tensor([n[2] for n in all_notes], dtype=torch.long)
+    
+    # window boundaries: start is first subdivision time; end should be
+    # the time of the first beat beyond the window (max_value) if available
+    # otherwise fall back to last subdivision timestamp.
+    window_start = float(ts_target[0].item())
+    if max_value is not None:
+        window_end = float(max_value)
+    else:
+        # add small epsilon to include final subdivision edge
+        window_end = float(ts_target[-1].item()) + 1e-6
+    
+    # Helper function: find nearest frame index using distance-based rounding
+    # preferring earlier frame on ties
+    def find_nearest_indices(note_times):
+        pos = torch.searchsorted(ts_target, note_times, right=False)
+        pos = pos.clamp(min=0, max=len(ts_target) - 1)
+        before_idx = (pos - 1).clamp(min=0)
+        after_idx = pos.clamp(max=len(ts_target) - 1)
+        ts_before = ts_target[before_idx]
+        ts_after = ts_target[after_idx]
+        dist_before = torch.abs(note_times - ts_before)
+        dist_after = torch.abs(note_times - ts_after)
+        nearest = torch.where(dist_before <= dist_after, before_idx, after_idx)
+        return nearest
+    
+    # Compute nearest indices for raw times
+    idx_starts = find_nearest_indices(note_starts)
+    idx_ends = find_nearest_indices(note_ends)
+    
+    # Determine which notes actually overlap the window
+    overlap_mask = (note_ends > window_start) & (note_starts < window_end)
+    if not overlap_mask.any():
+        return on, off, frm
+    
+    # Onset and offset masks restrict to events inside window bounds
+    on_mask = (note_starts >= window_start) & (note_starts < window_end)
+    off_mask = (note_ends >= window_start) & (note_ends < window_end)
+    
+    # Filter by max_value if provided (same as before but apply to masks too)
+    if max_value is not None:
+        max_mask = note_starts <= (max_value + window_end) / 2
+        overlap_mask &= max_mask
+        on_mask &= max_mask
+        off_mask &= max_mask
+        # we don't actually need to trim all_notes here anymore
+    
+    # Batch set on/off labels using masks
+    if on_mask.any():
+        on[pitches[on_mask], idx_starts[on_mask]] = 1.0
+    if off_mask.any():
+        off[pitches[off_mask], idx_ends[off_mask]] = 1.0
+    
+    # Frame regions: mark only within window overlap
+    # clamp note times to window boundaries for frame computation
+    starts_clamped = torch.clamp(note_starts, min=window_start, max=window_end)
+    ends_clamped = torch.clamp(note_ends, min=window_start, max=window_end)
+    idx_start_clamped = find_nearest_indices(starts_clamped)
+    idx_end_clamped = find_nearest_indices(ends_clamped)
+    
+    for i in range(len(note_starts)):
+        if not overlap_mask[i]:
+            continue
+        p = pitches[i].item()
+        a = int(min(idx_start_clamped[i].item(), idx_end_clamped[i].item()))
+        b = int(max(idx_start_clamped[i].item(), idx_end_clamped[i].item()))
+        frm[p, a : b + 1] = 1.0
 
     return on, off, frm

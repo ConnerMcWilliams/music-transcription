@@ -136,64 +136,38 @@ class MaestroDatasetWithWindowingInBeats(Dataset):
 
         if self.mel_aug_prewarp is not None:
             mel_time = self.mel_aug_prewarp(mel_time)
+            
+        
+        ts_target = build_subdivision_times(
+            beats, self.S, start_beat_idx, num_beats
+        )  # [L] seconds
+        if ts_target is None:
+            mel = torch.zeros(1, self.n_mels, L, dtype=torch.float32)
+            zeros = torch.zeros(L, 128, dtype=torch.float32)
+            labels = {"on": zeros.clone(), "off": zeros.clone(), "frame": zeros.clone()}
+            meta = {
+                "sr": sr,
+                "hop_length": self.hop_length,
+                "beats": None,
+                "subs_per_beat": self.S,
+                "start_beat_idx": start_beat_idx,
+            }
+            return mel, labels, meta
 
-        if self.use_beat_warp:
-            # ----- tempo-normalized branch -----
-            ts_target = build_subdivision_times(
-                beats, self.S, start_beat_idx, num_beats
-            )  # [L] seconds
-            if ts_target is None:
-                mel = torch.zeros(1, self.n_mels, L, dtype=torch.float32)
-                zeros = torch.zeros(L, 128, dtype=torch.float32)
-                labels = {"on": zeros.clone(), "off": zeros.clone(), "frame": zeros.clone()}
-                meta = {
-                    "sr": sr,
-                    "hop_length": self.hop_length,
-                    "beats": None,
-                    "subs_per_beat": self.S,
-                    "start_beat_idx": start_beat_idx,
-                }
-                return mel, labels, meta
+        mel_beat = linear_time_warp_mel(mel_time, ts_target, self.dt)  # [n_mels, L]
 
-            mel_beat = linear_time_warp_mel(mel_time, ts_target, self.dt)  # [n_mels, L]
-
-            if mel_beat.shape != (self.n_mels, L):
-                raise RuntimeError(
-                    f"mel_beat has shape {tuple(mel_beat.shape)}, expected ({self.n_mels}, {L})"
-                )
-            mel_for_model = mel_beat  # [n_mels, L]
-        else:
-            # ----- plain-time branch (no beat warp) -----
-            # naive crop: take a window of length L from mel_time based on start_beat_idx
-            # convert beat idx → approx frame idx using beats[] time stamps
-            start_t = beats[start_beat_idx]
-            end_t   = beats[min(start_beat_idx + num_beats, len(beats)-1)]
-            # duration in seconds of this window:
-            dur = end_t - start_t
-            # number of mel frames that span similar duration
-            frames_per_sec = sr / self.hop_length
-            approx_len = int(round(dur * frames_per_sec * self.S / (self.S / 1)))  
-            # fall back to L if weird
-            Tcrop = max(L, approx_len)
-            t0_frames = int(round(start_t * frames_per_sec))
-            t1_frames = t0_frames + Tcrop
-            mel_slice = mel_time[:, t0_frames:t1_frames]
-
-            # pad/truncate to L time steps for consistency
-            if mel_slice.shape[1] < L:
-                pad_amt = L - mel_slice.shape[1]
-                mel_slice = torch.nn.functional.pad(mel_slice, (0, pad_amt))
-            elif mel_slice.shape[1] > L:
-                mel_slice = mel_slice[:, :L]
-
-            mel_for_model = mel_slice  # [n_mels, L]
-
+        if mel_beat.shape != (self.n_mels, L):
+            raise RuntimeError(
+                f"mel_beat has shape {tuple(mel_beat.shape)}, expected ({self.n_mels}, {L})"
+            )
+        mel_for_model = mel_beat  # [n_mels, L]
+        
         if self.mel_aug_postwarp is not None:
             mel_for_model = self.mel_aug_postwarp(mel_for_model)
 
         # ---- labels (always beat-aligned right now) ----
         on_b, off_b, frm_b = midi_notes_to_beat_labels(
-            pm, beats, self.S, start_beat_idx, num_beats
+            pm, ts_target, self.S, start_beat_idx, num_beats
         )  # [128, L] or [L,128]
 
         on_t  = torch.as_tensor(on_b,  dtype=torch.float32)

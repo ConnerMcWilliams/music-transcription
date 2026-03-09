@@ -9,6 +9,7 @@ DEVICE = "cuda"
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MAESTRO_ROOT = os.path.join(PROJECT_ROOT, "dataset", "maestro")
 CSV_PATH = os.path.join(MAESTRO_ROOT, "maestro-v3.0.0.csv")
+CACHE_PATH = os.path.join(PROJECT_ROOT, "dataset", "transformed_data")
 
 # ==========================
 # DATA / AUDIO PARAMETERS
@@ -64,7 +65,7 @@ LOG_OFFSET      = 1e-6
 # ==========================
 # TRAINING HYPERPARAMETERS
 # ==========================
-NUM_EPOCHS   = 5
+NUM_EPOCHS   = 20
 WEIGHT_DECAY = 1e-4
 SEED         = 0
 
