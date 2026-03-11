@@ -562,7 +562,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
         prefetch_factor=2,
     )
 
-    model = HFTModel(dim=256, num_heads=8).to(device)
+    model = HFTModel(dim=256, num_heads=8, n_pitches=128, n_mels=N_MELS).to(device)
     
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])

@@ -256,7 +256,7 @@ def test_training() :
                               persistent_workers=True,  # Keep workers alive between epochs
                               prefetch_factor=2)  # Prefetch 2 batches per worker
     
-    model = HFTModel(dim=256, num_heads=8).to(device=DEVICE)
+    model = HFTModel(dim=256, num_heads=8, n_pitches=128, n_mels=N_MELS).to(DEVICE)
     
     # Use torch.compile if available (PyTorch 2.0+ and Triton available)
     if USE_COMPILE:
