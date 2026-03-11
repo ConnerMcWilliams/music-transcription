@@ -504,9 +504,10 @@ def run(local_rank, run_name=None, checkpoint_interval=1):
                 "torch_version": torch.__version__,
                 "cuda_version": torch.version.cuda,
                 "gpu_name": gpu_props.name,
-                "torch_seed": torch.initial_seed(),
-                "numpy_seed": np.random.get_state()[1][0],
-                "python_random_state": random.getstate()[1][0],
+                # convert seeds to plain Python ints for JSON dumping
+                "torch_seed": int(torch.initial_seed()),
+                "numpy_seed": int(np.random.get_state()[1][0]),
+                "python_random_state": int(random.getstate()[1][0]),
             },
         }
         with open(os.path.join(run_dir, "config.json"), "w") as f:
