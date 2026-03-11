@@ -48,6 +48,12 @@ except ImportError:
     TRITON_AVAILABLE = False
 USE_COMPILE = USE_COMPILE and TRITON_AVAILABLE
 
+
+def mark_cudagraph_step_begin():
+    """Mark a new CUDA Graph step when supported by this PyTorch build."""
+    if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+        torch.compiler.cudagraph_mark_step_begin()
+
 # --- logging/checkpoint utilities ------------------------------------------------
 def setup_run_dir(run_name=None):
     """Create directory structure for a new training run and return its path."""
@@ -106,6 +112,7 @@ def compute_eval_metrics(model, loader, criterion, device, threshold=0.5):
                         v = v.unsqueeze(0)
                     # Ensure label is on the correct device
                     y[k] = v.to(device=device, dtype=torch.float32)
+            mark_cudagraph_step_begin()
             out = model(x)
             loss, _ = criterion(out, y)
             total_loss += loss.item()
@@ -247,9 +254,11 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
         if use_amp:
             # use new autocast API
             with torch.amp.autocast('cuda'):
+                mark_cudagraph_step_begin()
                 out = model(x)
                 loss, _metrics = criterion(out, y)
         else:
+            mark_cudagraph_step_begin()
             out = model(x)
             loss, _metrics = criterion(out, y)
 
@@ -424,6 +433,7 @@ def test_model(model_path, num_samples=5, device=None):
             x = x.unsqueeze(0)
             # Ensure input is on the correct device
             x = x.to(device, dtype=torch.float32)
+            mark_cudagraph_step_begin()
             out = model(x)
             y = {}
             for k in LABEL_KEYS:
@@ -456,6 +466,7 @@ def compute_f1_score(model, dataloader, threshold=0.5, device=None):
         for x, labels in tqdm(dataloader, desc="Computing F1", unit="batch"):
             # Ensure input is on the correct device
             x = x.to(device, dtype=torch.float32)
+            mark_cudagraph_step_begin()
             out = model(x)
             pred_frame = torch.sigmoid(out["frame"]) > threshold
             true_frame = labels["frame"]
@@ -651,6 +662,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
             x_val, y_val = batch
             x_val = x_val.to(device=device, dtype=torch.float32, non_blocking=True)
             with torch.no_grad():
+                mark_cudagraph_step_begin()
                 out_val = model(x_val)
             preds = {k: v.cpu() for k, v in out_val.items()}
             truths = {k: v.cpu() for k, v in y_val.items()}
@@ -756,6 +768,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
                         y[k] = v.to(device=device,
                                     dtype=torch.float32,
                                     non_blocking=True)
+            mark_cudagraph_step_begin()
             out = model(x)
             pred_frame = out["frame"][0].detach().cpu()
             true_frame = y["frame"][0].detach().cpu()
