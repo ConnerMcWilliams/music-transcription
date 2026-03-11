@@ -96,6 +96,7 @@ def compute_eval_metrics(model, loader, criterion, device, threshold=0.5):
     all_true_frame, all_pred_frame = [], []
     with torch.no_grad():
         for x, labels in loader:
+            # Ensure input is on the correct device
             x = x.to(device, dtype=torch.float32)
             y = {}
             for k in LABEL_KEYS:
@@ -103,7 +104,8 @@ def compute_eval_metrics(model, loader, criterion, device, threshold=0.5):
                     v = labels[k]
                     if v.dim() == 2:
                         v = v.unsqueeze(0)
-                    y[k] = v.to(device, dtype=torch.float32)
+                    # Ensure label is on the correct device
+                    y[k] = v.to(device, dtype=torch.float32, device=device)
             out = model(x)
             loss, _ = criterion(out, y)
             total_loss += loss.item()
