@@ -415,7 +415,9 @@ def test_model(model_path, num_samples=5, device=None):
     with torch.no_grad():
         for i in range(min(num_samples, len(cache_dataset))):
             x, labels = cache_dataset[i]
-            x = x.unsqueeze(0).to(device, dtype=torch.float32)
+            x = x.unsqueeze(0)
+            # Ensure input is on the correct device
+            x = x.to(device, dtype=torch.float32)
             out = model(x)
             y = {}
             for k in LABEL_KEYS:
@@ -423,7 +425,8 @@ def test_model(model_path, num_samples=5, device=None):
                     v = labels[k]
                     if v.dim() == 2:
                         v = v.unsqueeze(0)
-                    y[k] = v.to(device, dtype=torch.float32)
+                    # Ensure label is on the correct device
+                    y[k] = v.to(device, dtype=torch.float32, device=device)
             pred_frame = out["frame"][0].detach().cpu()
             true_frame = y["frame"][0].detach().cpu()
             pred_on = out["on"][0].detach().cpu()
@@ -445,6 +448,7 @@ def compute_f1_score(model, dataloader, threshold=0.5, device=None):
     all_pred = []
     with torch.no_grad():
         for x, labels in tqdm(dataloader, desc="Computing F1", unit="batch"):
+            # Ensure input is on the correct device
             x = x.to(device, dtype=torch.float32)
             out = model(x)
             pred_frame = torch.sigmoid(out["frame"]) > threshold
