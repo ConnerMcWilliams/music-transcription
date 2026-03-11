@@ -37,7 +37,9 @@ from config import (CSV_PATH, N_MELS, CACHE_PATH, BATCH_SIZE, DEVICE,
 LABEL_KEYS = ("on", "off", "frame", "vel")
 
 # AMP / compile detection (unchanged but adapted for 2.8)
-USE_AMP = hasattr(torch.cuda, "amp") and torch.cuda.is_available()
+# AMP is off by default to match original `test.py`.  Use the
+# --amp command‑line flag to enable it (see main()).
+USE_AMP = False
 USE_COMPILE = hasattr(torch, "compile")
 try:
     import triton  # compile requires Triton 2.0+
@@ -459,7 +461,7 @@ def compute_f1_score(model, dataloader, threshold=0.5, device=None):
     f1 = 2 * precision * recall / (precision + recall + 1e-7)
     return f1.item()
 
-def run(local_rank, run_name=None, checkpoint_interval=1):
+def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
     """Top‑level training/experiment entrypoint.  called once per process.
 
     Args:
@@ -469,6 +471,10 @@ def run(local_rank, run_name=None, checkpoint_interval=1):
     """
     # allow modifying the module-level flag from within this function
     global USE_COMPILE
+
+    # apply command-line AMP override before doing anything else
+    global USE_AMP
+    USE_AMP = bool(amp)
 
     # set up DDP if necessary
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -734,6 +740,8 @@ def run(local_rank, run_name=None, checkpoint_interval=1):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--amp", action="store_true",
+                        help="enable automatic mixed precision (default off, matches earlier test)")
     parser.add_argument("--local_rank", type=int,
                         default=int(os.environ.get("LOCAL_RANK", 0)))
     parser.add_argument("--run_name", type=str, default=None,
@@ -742,7 +750,8 @@ def main():
                         help="Save a checkpoint every N epochs")
     args = parser.parse_args()
     run(args.local_rank, run_name=args.run_name,
-        checkpoint_interval=args.checkpoint_interval)
+        checkpoint_interval=args.checkpoint_interval,
+        amp=args.amp)
 
 if __name__ == "__main__":
     main()
