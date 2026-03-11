@@ -587,7 +587,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
     
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])
-    """
+    """a
     if world_size > 1:
         # Dummy forward pass to initialize lazy modules before DDP
         with torch.no_grad():
