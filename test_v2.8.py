@@ -738,6 +738,9 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
             show_on_off_overlay(pred_frame, 12, 21, 108)
             show_on_off_overlay(true_frame, 12, 21, 108)
 
+from torch.distributed.elastic.multiprocessing.errors import record
+
+@record
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--amp", action="store_true",
