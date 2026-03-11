@@ -28,10 +28,6 @@ class ConvStem(nn.Module):
         )
 
     def forward(self, x):
-        # Debug: print device info for input and parameters
-        print(f"[ConvStem] Input device: {x.device}")
-        for name, param in self.named_parameters():
-            print(f"[ConvStem] Param {name} device: {param.device}")
         return self.net(x)
 
 

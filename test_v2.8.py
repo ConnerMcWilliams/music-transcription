@@ -562,8 +562,10 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
         prefetch_factor=2,
     )
 
-    model = HFTModel(dim=256, num_heads=8)
-    model.to(device)
+    model = HFTModel(dim=256, num_heads=8).to(device)
+    
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank])
     """
     if world_size > 1:
         # Dummy forward pass to initialize lazy modules before DDP
