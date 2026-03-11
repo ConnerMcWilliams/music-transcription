@@ -238,7 +238,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
                     y[k] = v.to(device=device, dtype=torch.float32, non_blocking=True)
 
         if use_amp:
-            with torch.cuda.amp.autocast():
+            # use new autocast API
+            with torch.amp.autocast('cuda'):
                 out = model(x)
                 loss, _metrics = criterion(out, y)
         else:
@@ -554,14 +555,21 @@ def run(local_rank, run_name=None, checkpoint_interval=1):
         model = DDP(model, device_ids=[local_rank])
 
     if USE_COMPILE:
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
+        # torch.compile and AMP sometimes conflict with dtype promotion;
+        # disable compile when automatic mixed precision is active.
+        if USE_AMP:
             if local_rank == 0:
-                print("Using torch.compile with reduce-overhead mode")
-        except Exception as e:
-            if local_rank == 0:
-                print(f"torch.compile failed: {e}, falling back to eager mode")
+                print("AMP enabled – disabling torch.compile due to known dtype issues")
             USE_COMPILE = False
+        else:
+            try:
+                model = torch.compile(model, mode="reduce-overhead")
+                if local_rank == 0:
+                    print("Using torch.compile with reduce-overhead mode")
+            except Exception as e:
+                if local_rank == 0:
+                    print(f"torch.compile failed: {e}, falling back to eager mode")
+                USE_COMPILE = False
     else:
         if local_rank == 0:
             print("Triton not available, using eager mode")
