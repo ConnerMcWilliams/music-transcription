@@ -558,6 +558,10 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
 
     model = HFTModel(dim=256, num_heads=8).to(device)
     if world_size > 1:
+        # Dummy forward pass to initialize lazy modules before DDP
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 1, 100, N_MELS, device=device)
+            _ = model(dummy_input)
         model = DDP(model, device_ids=[local_rank])
 
     if USE_COMPILE:
