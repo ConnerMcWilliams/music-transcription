@@ -556,15 +556,17 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
         prefetch_factor=2,
     )
 
-    model = HFTModel(dim=256, num_heads=8).to(device)
+    model = HFTModel(dim=256, num_heads=8)
     if world_size > 1:
         # Dummy forward pass to initialize lazy modules before DDP
         with torch.no_grad():
             dummy_input = torch.randn(1, 1, 100, N_MELS, device=device)
             _ = model(dummy_input)
-        # Move model to device again to ensure all parameters are on CUDA
+        # Move model to device after lazy initialization
         model = model.to(device)
         model = DDP(model, device_ids=[local_rank])
+    else:
+        model = model.to(device)
 
     if USE_COMPILE:
         # torch.compile currently behaves unpredictably when AMP is enabled
