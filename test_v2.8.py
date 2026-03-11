@@ -562,6 +562,8 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
         with torch.no_grad():
             dummy_input = torch.randn(1, 1, 100, N_MELS, device=device)
             _ = model(dummy_input)
+        # Move model to device again to ensure all parameters are on CUDA
+        model = model.to(device)
         model = DDP(model, device_ids=[local_rank])
 
     if USE_COMPILE:
