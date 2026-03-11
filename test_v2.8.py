@@ -462,6 +462,9 @@ def run(local_rank, run_name=None, checkpoint_interval=1):
         run_name: optional name for this run (creates training_runs/<run_name>)
         checkpoint_interval: save checkpoint every N epochs
     """
+    # allow modifying the module-level flag from within this function
+    global USE_COMPILE
+
     # set up DDP if necessary
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size > 1:
