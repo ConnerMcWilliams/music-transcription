@@ -205,11 +205,6 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
         num_samples += batch_size
 
         x = x.to(device, dtype=torch.float32, non_blocking=True)
-        # if we're compiling with AMP active, pre-cast inputs to float16;
-        # the dynamo/autocast combo can otherwise leave the input float while
-        # weights/biases are half, triggering a mismatch error.
-        if use_amp and USE_COMPILE:
-            x = x.half()
 
         # batch label transfer optimization (unchanged)
         y = {}
@@ -560,15 +555,23 @@ def run(local_rank, run_name=None, checkpoint_interval=1):
         model = DDP(model, device_ids=[local_rank])
 
     if USE_COMPILE:
-        # try to compile; mixed precision may require manual input casting
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
+        # torch.compile currently behaves unpredictably when AMP is enabled
+        # (datatype mismatches in conv/batchnorm).  to keep behavior identical
+        # to the original `test.py` we simply avoid compiling when `USE_AMP` is
+        # true.  the old warning message explains why.
+        if USE_AMP:
             if local_rank == 0:
-                print("Using torch.compile with reduce-overhead mode")
-        except Exception as e:
-            if local_rank == 0:
-                print(f"torch.compile failed: {e}, falling back to eager mode")
+                print("AMP enabled – disabling torch.compile due to known dtype issues")
             USE_COMPILE = False
+        else:
+            try:
+                model = torch.compile(model, mode="reduce-overhead")
+                if local_rank == 0:
+                    print("Using torch.compile with reduce-overhead mode")
+            except Exception as e:
+                if local_rank == 0:
+                    print(f"torch.compile failed: {e}, falling back to eager mode")
+                USE_COMPILE = False
     else:
         if local_rank == 0:
             print("Triton not available, using eager mode")
