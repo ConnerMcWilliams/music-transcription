@@ -159,7 +159,7 @@ def load_model_checkpoint(model_path, device):
                      n_pitches=config.get("n_pitches", 128))
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     model.to(device)
-    if torch.distributed.get_rank() == 0:
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         print(f"Loaded model from {model_path}")
         print(f"  Epoch: {checkpoint['epoch']}")
         print(f"  Final loss: {checkpoint['loss']:.6f}")
@@ -181,7 +181,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
     num_samples = 0
     if use_amp:
         if scaler is None:
-            scaler = torch.cuda.amp.GradScaler()
+            # use new torch.amp API (warned in FutureWarning)
+            scaler = torch.amp.GradScaler('cuda')
     else:
         scaler = None
 
@@ -196,8 +197,9 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
     steps_done = 0
 
     for step, (x, labels) in enumerate(loader):
-        if show_progress and step % 10 == 0 and torch.distributed.get_rank() == 0:
-            print(f"Batch {step+1}/{total_batches}", end="\r")
+        if show_progress and step % 10 == 0:
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                print(f"Batch {step+1}/{total_batches}", end="\r")
 
         batch_size = x.size(0)
         num_samples += batch_size
@@ -222,11 +224,12 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
                                                                non_blocking=True)
             y = dict(zip(LABEL_KEYS, label_batch.unbind(0)))
         else:
-            if not shapes_valid and label_tensors and torch.distributed.get_rank() == 0:
-                print(
-                    f"Warning: Label shapes don't match for batching: "
-                    f"{[v.shape for v in label_tensors]}"
-                )
+            if not shapes_valid and label_tensors:
+                if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                    print(
+                        f"Warning: Label shapes don't match for batching: "
+                        f"{[v.shape for v in label_tensors]}"
+                    )
             for k in LABEL_KEYS:
                 if k in labels:
                     v = labels[k]
@@ -289,8 +292,9 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
         optimizer.zero_grad(set_to_none=True)
         total += accumulated_loss * batch_size * accumulation_steps
 
-    if show_progress and torch.distributed.get_rank() == 0:
-        print()
+    if show_progress:
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            print()
 
     avg_loss = total / max(1, num_samples)
     avg_grad = sum(grad_norms) / len(grad_norms) if grad_norms else 0.0
@@ -366,7 +370,7 @@ def continue_training(model_path, additional_epochs, device):
         lambda_off=0.5,
         pos_weight_frame=torch.full((128,), 0.5),
     )
-    scaler = torch.cuda.amp.GradScaler() if USE_AMP else None
+    scaler = torch.amp.GradScaler('cuda') if USE_AMP else None
     for epoch in range(additional_epochs):
         tr, _, avg_grad, steps, scaler = train_one_epoch(
             model,
@@ -378,9 +382,9 @@ def continue_training(model_path, additional_epochs, device):
             epoch=epoch,
             scaler=scaler,
         )
-        if torch.distributed.get_rank() == 0:
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
             print(f"[Continue Training] epoch {epoch + 1}  train={tr:.4f}")
-    if torch.distributed.get_rank() == 0:
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         os.makedirs("model_weights", exist_ok=True)
         torch.save(
             {
@@ -583,7 +587,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1):
     accumulation_steps = 2
     global_step = 0
     best_val_loss = float('inf')
-    scaler = torch.cuda.amp.GradScaler() if USE_AMP else None
+    scaler = torch.amp.GradScaler('cuda') if USE_AMP else None
     for epoch in range(NUM_EPOCHS):
         tr, lr_track, avg_grad, steps, scaler = train_one_epoch(
             model,
