@@ -54,6 +54,11 @@ def mark_cudagraph_step_begin():
     if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
         torch.compiler.cudagraph_mark_step_begin()
 
+
+def clone_model_outputs(out_dict):
+    """Detach+clone model outputs for safe use outside the current compiled step."""
+    return {k: v.detach().clone() for k, v in out_dict.items()}
+
 # --- logging/checkpoint utilities ------------------------------------------------
 def setup_run_dir(run_name=None):
     """Create directory structure for a new training run and return its path."""
@@ -435,6 +440,7 @@ def test_model(model_path, num_samples=5, device=None):
             x = x.to(device, dtype=torch.float32)
             mark_cudagraph_step_begin()
             out = model(x)
+            out = clone_model_outputs(out)
             y = {}
             for k in LABEL_KEYS:
                 if k in labels:
@@ -664,6 +670,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
             with torch.no_grad():
                 mark_cudagraph_step_begin()
                 out_val = model(x_val)
+                out_val = clone_model_outputs(out_val)
             preds = {k: v.cpu() for k, v in out_val.items()}
             truths = {k: v.cpu() for k, v in y_val.items()}
             torch.save({"preds": preds, "truths": truths},
@@ -770,6 +777,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
                                     non_blocking=True)
             mark_cudagraph_step_begin()
             out = model(x)
+            out = clone_model_outputs(out)
             pred_frame = out["frame"][0].detach().cpu()
             true_frame = y["frame"][0].detach().cpu()
             show_on_off_overlay(pred_frame, 12, 21, 108)
