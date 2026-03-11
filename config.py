@@ -7,8 +7,8 @@ import torch
 # ==========================
 DEVICE = "cuda"
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-MAESTRO_ROOT = os.path.join(PROJECT_ROOT, "dataset", "maestro")
-CSV_PATH = os.path.join(MAESTRO_ROOT, "maestro-v3.0.0.csv")
+MAESTRO_ROOT = os.path.join(PROJECT_ROOT, "dataset", "maestro-v3.0.0")
+CSV_PATH = os.path.join(PROJECT_ROOT,"dataset", "maestro", "maestro-v3.0.0.csv")
 CACHE_PATH = os.path.join(PROJECT_ROOT, "dataset", "transformed_data")
 
 # ==========================

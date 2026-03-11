@@ -1,0 +1,31 @@
+{
+  "dataset_params": {
+    "cache_path": "/workspace/music-transcription/dataset/transformed_data",
+    "n_mels": 229,
+    "beats_per_clip": 8,
+    "subdivisions_per_beat": 12,
+    "hop_length": 160,
+    "sample_rate": 16000
+  },
+  "model_params": {
+    "dim": 256,
+    "depth": 6,
+    "num_heads": 8,
+    "n_pitches": 128
+  },
+  "training_params": {
+    "batch_size": 4,
+    "accumulation_steps": 2,
+    "lr": 0.0001,
+    "num_epochs": 20,
+    "scheduler": "onecycle"
+  },
+  "env": {
+    "torch_version": "2.8.0+cu128",
+    "cuda_version": "12.8",
+    "gpu_name": "NVIDIA GeForce RTX 5090",
+    "torch_seed": 16485016103158035640,
+    "numpy_seed": 2147483648,
+    "python_random_state": 2147483648
+  }
+}

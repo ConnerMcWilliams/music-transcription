@@ -249,7 +249,7 @@ def test_training() :
     cache_dataset = CashDataset(CACHE_PATH)
     
     cache_loader = DataLoader(cache_dataset,
-                              batch_size=4,  # Increased from 4 to 16 for better GPU utilization
+                              batch_size=16,  # Increased from 4 to 16 for better GPU utilization
                                 shuffle=True,
                               num_workers=4,  # Use multiple workers for data loading
                               pin_memory=True,  # Faster host->device transfers
@@ -523,10 +523,10 @@ def main() :
     # .6 best so far
     #print(compute_f1_score(model, dataloader, threshold=0.5))
     #display_transformed_dataset(3)
-    """
-    cache_data(metadata=metadata, root_dir=MAESTRO_ROOT, cache_dir=CACHE_PATH, mel_tx=mel_tx, n_mels=N_MELS, 
-               subdivisions=SUBDIVISIONS_PER_BEAT, 
-                 beats_per_window=BEATS_PER_CLIP, hop_length=HOP_LENGTH, sr_target=SAMPLE_RATE)
-    #"""
+    
+    #cache_data(metadata=metadata, root_dir=MAESTRO_ROOT, cache_dir=CACHE_PATH, mel_tx=mel_tx, n_mels=N_MELS, 
+    #           subdivisions=SUBDIVISIONS_PER_BEAT, 
+    #           beats_per_window=BEATS_PER_CLIP, hop_length=HOP_LENGTH, sr_target=SAMPLE_RATE)
+    
 if __name__ == "__main__" :
     main()
