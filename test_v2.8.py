@@ -10,6 +10,7 @@ import datetime
 import json
 import random
 import platform
+import time
 import pandas as pd
 import pickle
 import numpy as np
@@ -671,6 +672,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
     best_val_loss = float('inf')
     scaler = torch.amp.GradScaler('cuda') if USE_AMP else None
     for epoch in range(NUM_EPOCHS):
+        epoch_start = time.perf_counter()
         tr, lr_track, avg_grad, steps, scaler = train_one_epoch(
             model,
             cache_loader,
@@ -702,11 +704,14 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
             torch.save({"preds": preds, "truths": truths},
                        os.path.join(run_dir, "val_preds", f"epoch_{epoch}.pt"))
 
+        epoch_seconds = time.perf_counter() - epoch_start
+
         if local_rank == 0:
             # print a status line
             print(
                 f"[Onset and Frames] epoch {epoch+1}/{NUM_EPOCHS}  "
-                f"train={tr:.4f}  vlr_end={opt.param_groups[0]['lr']:.2e}"
+                f"train={tr:.4f}  vlr_end={opt.param_groups[0]['lr']:.2e}  "
+                f"time={epoch_seconds:.2f}s"
             )
 
             # compose metrics entry
@@ -716,6 +721,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
                 "train_loss": tr,
                 "lr": opt.param_groups[0]["lr"],
                 "grad_norm": avg_grad,
+                "epoch_seconds": epoch_seconds,
             }
             if val_metrics is not None:
                 entry.update({
