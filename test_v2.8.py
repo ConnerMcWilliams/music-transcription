@@ -105,7 +105,7 @@ def compute_eval_metrics(model, loader, criterion, device, threshold=0.5):
                     if v.dim() == 2:
                         v = v.unsqueeze(0)
                     # Ensure label is on the correct device
-                    y[k] = v.to(device, dtype=torch.float32, device=device)
+                    y[k] = v.to(device=device, dtype=torch.float32)
             out = model(x)
             loss, _ = criterion(out, y)
             total_loss += loss.item()
@@ -180,6 +180,9 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
     None and `use_amp` is True, a new scaler will be created internally.
     """
     model.train()
+    if device is None:
+        # Default to model parameter device to avoid accidental CPU/CUDA mixing.
+        device = next(model.parameters()).device
     total = 0.0
     lr_track = []
     num_samples = 0
@@ -383,6 +386,7 @@ def continue_training(model_path, additional_epochs, device):
             criterion,
             optimizer,
             scheduler=None,
+            device=device,
             use_amp=USE_AMP,
             epoch=epoch,
             scaler=scaler,
@@ -428,7 +432,7 @@ def test_model(model_path, num_samples=5, device=None):
                     if v.dim() == 2:
                         v = v.unsqueeze(0)
                     # Ensure label is on the correct device
-                    y[k] = v.to(device, dtype=torch.float32, device=device)
+                    y[k] = v.to(device=device, dtype=torch.float32)
             pred_frame = out["frame"][0].detach().cpu()
             true_frame = y["frame"][0].detach().cpu()
             pred_on = out["on"][0].detach().cpu()
@@ -630,6 +634,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
             criterion,
             opt,
             scheduler=scheduler,
+            device=device,
             use_amp=USE_AMP,
             accumulation_steps=accumulation_steps,
             epoch=epoch,
