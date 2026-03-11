@@ -24,7 +24,7 @@
     "torch_version": "2.8.0+cu128",
     "cuda_version": "12.8",
     "gpu_name": "NVIDIA GeForce RTX 5090",
-    "torch_seed": 9444079081116677820,
+    "torch_seed": 9238551626781965119,
     "numpy_seed": 2147483648,
     "python_random_state": 2147483648
   }
