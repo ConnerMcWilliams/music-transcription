@@ -80,8 +80,18 @@ def setup_run_dir(run_name=None):
 
 def log_metrics(metrics_path, entry):
     """Append a JSON line to the metrics log and flush to disk."""
+    def _to_json_safe(v):
+        if isinstance(v, torch.Tensor):
+            if v.numel() == 1:
+                return v.item()
+            return v.detach().cpu().tolist()
+        if isinstance(v, np.generic):
+            return v.item()
+        return v
+
+    safe_entry = {k: _to_json_safe(v) for k, v in entry.items()}
     with open(metrics_path, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+        f.write(json.dumps(safe_entry) + "\n")
         f.flush()
 
 
