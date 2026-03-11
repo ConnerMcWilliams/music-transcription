@@ -129,7 +129,7 @@ class AMTEncoder(nn.Module):
         self.out_norm = nn.BatchNorm2d(dim)
 
     def forward(self, x):
-        # x: [B, 1, T, F]
+        # x: [B, 1, T, F]a
         x = self.stem(x)
         for block in self.blocks:
             x = block(x)
@@ -137,12 +137,15 @@ class AMTEncoder(nn.Module):
         return x  # [B, C, T, F_out]
     
 class PianoHeads(nn.Module):
-    def __init__(self, dim, n_pitches=88):
+    def __init__(self, dim, n_mels, n_pitches=88):
         super().__init__()
         self.dim = dim
         self.n_pitches = n_pitches
-        # Use LazyLinear for automatic input size detection
-        self.proj = nn.LazyLinear(512)
+
+        f_out = (n_mels + 1) // 2
+        proj_in_features = dim * f_out
+
+        self.proj = nn.Linear(proj_in_features, 512)
         self.onset_head  = nn.Linear(512, n_pitches)
         self.frame_head  = nn.Linear(512, n_pitches)
         self.offset_head = nn.Linear(512, n_pitches)
@@ -150,8 +153,6 @@ class PianoHeads(nn.Module):
     def forward(self, x):
         # x: [B, C, T, F]
         B, C, T, F = x.shape
-
-        # flatten (C, F) at each time step
         x = x.permute(0, 2, 1, 3).reshape(B, T, C * F)
         x = torch.nn.functional.gelu(self.proj(x))
 
@@ -167,14 +168,16 @@ class PianoHeads(nn.Module):
 
 
 class HFTModel(nn.Module):
-    """
-    Combined harmonic-frequency-time model for music transcription.
-    Wraps AMTEncoder and PianoHeads with output key compatibility.
-    
-    Input: [B, 1, n_mels, time_steps] spectrogram (freq × time format)
-    Output: {"on": onset_logits, "frame": frame_logits, "off": offset_logits}
-    """
-    def __init__(self, dim=256, depth=6, num_heads=8, dropout=0.1, ff_mult=4, n_pitches=128):
+    def __init__(
+        self,
+        dim=256,
+        depth=6,
+        num_heads=8,
+        dropout=0.1,
+        ff_mult=4,
+        n_pitches=128,
+        n_mels=128,
+    ):
         super().__init__()
         self.encoder = AMTEncoder(
             in_ch=1,
@@ -184,17 +187,12 @@ class HFTModel(nn.Module):
             dropout=dropout,
             ff_mult=ff_mult,
         )
-        self.heads = PianoHeads(dim=dim, n_pitches=n_pitches)
+        self.heads = PianoHeads(dim=dim, n_mels=n_mels, n_pitches=n_pitches)
 
     def forward(self, x):
-        # Input: [B, 1, n_mels, time_steps] (freq × time format from spectrogram)
-        # Convert to [B, 1, time_steps, n_mels] (time × freq format expected by hFT)
         x = x.transpose(2, 3)
-        
-        x = self.encoder(x)  # [B, C, T, F]
+        x = self.encoder(x)
         logits = self.heads(x)
-        
-        # Rename keys to match expected format: onset->on, offset->off
         return {
             "on": logits["onset"],
             "off": logits["offset"],
