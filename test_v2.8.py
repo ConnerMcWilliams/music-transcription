@@ -294,15 +294,15 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
+            if scheduler is not None and step_per_batch:
+                scheduler.step()
+
             grad_norms.append(grad_norm)
             steps_done += 1
 
             optimizer.zero_grad(set_to_none=True)
             total += accumulated_loss * batch_size * accumulation_steps
             accumulated_loss = 0.0
-
-        if scheduler is not None and step_per_batch:
-            scheduler.step()
 
         lr_track.append(optimizer.param_groups[0]["lr"])
 
@@ -316,6 +316,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+        if scheduler is not None and step_per_batch:
+            scheduler.step()
         grad_norms.append(grad_norm)
         steps_done += 1
         optimizer.zero_grad(set_to_none=True)
@@ -618,22 +620,25 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
             USE_COMPILE = False
         else:
             try:
-                compile_kwargs = {
-                    "mode": "reduce-overhead",
-                    "options": {"triton.cudagraphs": False},
-                }
-                model = torch.compile(model, **compile_kwargs)
-                if local_rank == 0:
-                    print("Using torch.compile with reduce-overhead mode (cudagraphs disabled)")
-            except TypeError:
-                # Fallback for builds that don't accept compile options.
                 model = torch.compile(model, mode="reduce-overhead")
                 if local_rank == 0:
-                    print("Using torch.compile with reduce-overhead mode (options unsupported)")
+                    print("Using torch.compile with reduce-overhead mode")
             except Exception as e:
-                if local_rank == 0:
-                    print(f"torch.compile failed: {e}, falling back to eager mode")
-                USE_COMPILE = False
+                # Some 2.8 builds reject passing both mode and options together.
+                # Retry with options-only to keep compile enabled and disable cudagraphs.
+                if "Either mode or options can be specified" in str(e):
+                    try:
+                        model = torch.compile(model, options={"triton.cudagraphs": False})
+                        if local_rank == 0:
+                            print("Using torch.compile with options-only (cudagraphs disabled)")
+                    except Exception as e2:
+                        if local_rank == 0:
+                            print(f"torch.compile failed: {e2}, falling back to eager mode")
+                        USE_COMPILE = False
+                else:
+                    if local_rank == 0:
+                        print(f"torch.compile failed: {e}, falling back to eager mode")
+                    USE_COMPILE = False
     else:
         if local_rank == 0:
             print("Triton not available, using eager mode")
