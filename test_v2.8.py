@@ -569,7 +569,7 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
         model = model.to(device)
 
     if USE_COMPILE:
-        # torch.compile currently behaves unpredictably when AMP is enabled
+        # torch.compile ccurrently behaves unpredictably when AMP is enabled
         # (datatype mismatches in conv/batchnorm).  to keep behavior identical
         # to the original `test.py` we simply avoid compiling when `USE_AMP` is
         # true.  the old warning message explains why.
