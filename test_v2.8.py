@@ -59,6 +59,11 @@ def clone_model_outputs(out_dict):
     """Detach+clone model outputs for safe use outside the current compiled step."""
     return {k: v.detach().clone() for k, v in out_dict.items()}
 
+
+def clone_model_outputs_for_backward(out_dict):
+    """Clone model outputs while preserving autograd links for backward."""
+    return {k: v.clone() for k, v in out_dict.items()}
+
 # --- logging/checkpoint utilities ------------------------------------------------
 def setup_run_dir(run_name=None):
     """Create directory structure for a new training run and return its path."""
@@ -261,10 +266,12 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None,
             with torch.amp.autocast('cuda'):
                 mark_cudagraph_step_begin()
                 out = model(x)
+                out = clone_model_outputs_for_backward(out)
                 loss, _metrics = criterion(out, y)
         else:
             mark_cudagraph_step_begin()
             out = model(x)
+            out = clone_model_outputs_for_backward(out)
             loss, _metrics = criterion(out, y)
 
         loss = loss / accumulation_steps
@@ -611,9 +618,18 @@ def run(local_rank, run_name=None, checkpoint_interval=1, amp=False):
             USE_COMPILE = False
         else:
             try:
+                compile_kwargs = {
+                    "mode": "reduce-overhead",
+                    "options": {"triton.cudagraphs": False},
+                }
+                model = torch.compile(model, **compile_kwargs)
+                if local_rank == 0:
+                    print("Using torch.compile with reduce-overhead mode (cudagraphs disabled)")
+            except TypeError:
+                # Fallback for builds that don't accept compile options.
                 model = torch.compile(model, mode="reduce-overhead")
                 if local_rank == 0:
-                    print("Using torch.compile with reduce-overhead mode")
+                    print("Using torch.compile with reduce-overhead mode (options unsupported)")
             except Exception as e:
                 if local_rank == 0:
                     print(f"torch.compile failed: {e}, falling back to eager mode")
