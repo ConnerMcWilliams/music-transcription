@@ -31,19 +31,34 @@ LABEL_KEYS = ("on", "off", "frame", "vel")
 
 def load_model_checkpoint(model_path, device=DEVICE):
     """Load a saved model checkpoint."""
-    checkpoint = torch.load(model_path, map_location=device)
-    
-    # Recreate model with saved config
-    config = checkpoint['config']
-    model = HFTModel(dim=config['dim'], depth=config.get('depth', 6), num_heads=config['num_heads'], n_pitches=config.get('n_pitches', 128))
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+
+    state_dict = checkpoint.get('model_state_dict', checkpoint)
+    config = checkpoint.get('config', {
+        'dim': 256,
+        'depth': 6,
+        'num_heads': 8,
+        'n_pitches': 128,
+        'n_mels': N_MELS,
+    })
+
+    model = HFTModel(
+        dim=config['dim'],
+        depth=config.get('depth', 6),
+        num_heads=config['num_heads'],
+        n_pitches=config.get('n_pitches', 128),
+        n_mels=config.get('n_mels', N_MELS),
+    )
+    model.load_state_dict(state_dict, strict=False)
     model.to(device)
-    
+
     print(f"Loaded model from {model_path}")
-    print(f"  Epoch: {checkpoint['epoch']}")
-    print(f"  Final loss: {checkpoint['loss']:.6f}")
+    if 'epoch' in checkpoint:
+        print(f"  Epoch: {checkpoint['epoch']}")
+    if 'loss' in checkpoint:
+        print(f"  Final loss: {checkpoint['loss']:.6f}")
     print(f"  Config: {config}")
-    
+
     return model
 
 # Check for available optimizations
@@ -178,7 +193,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler=None, step_pe
     avg_loss = total / max(1, num_samples)
     return avg_loss, lr_track
 
-def show_on_off_overlay(frm, S, pitch_lo=21, pitch_hi=108):
+def show_on_off_overlay(frm, S, pitch_lo=21, pitch_hi=108, title="Frame probability distribution"):
     frm_np = frm[pitch_lo:pitch_hi+1].cpu().numpy().T
 
     plt.figure(figsize=(12, 4))
@@ -189,25 +204,25 @@ def show_on_off_overlay(frm, S, pitch_lo=21, pitch_hi=108):
 
     plt.xlabel("Subdivision index")
     plt.ylabel("Pitch index within range")
-    plt.title("Frame probability distribution")
+    plt.title(title)
     plt.show()
 
-def show_on_off_predictions(on_prob, off_prob, frame_prob, threshold=0.5, S=24, pitch_lo=21, pitch_hi=108):
+def show_on_off_predictions(on_prob, off_prob, frame_prob, threshold=0.001, S=24, pitch_lo=21, pitch_hi=108):
     """
-    Visualize predicted onset, offset, and frame events after thresholding.
+    Visualize predicted onset, offset, and frame events after thresholding logits.
     
     Args:
-        on_prob: Onset probabilities [T, P]
-        off_prob: Offset probabilities [T, P]
-        frame_prob: Frame probabilities [T, P]
+        on_prob: Onset logits [T, P]
+        off_prob: Offset logits [T, P]
+        frame_prob: Frame logits [T, P]
         threshold: Threshold for binarizing predictions
         S: Subdivision spacing for vertical lines
         pitch_lo, pitch_hi: Pitch range to display
     """
-    # Apply threshold to get binary predictions
-    on_pred = (on_prob > threshold).cpu().numpy()
-    off_pred = (off_prob > threshold).cpu().numpy()
-    frame_pred = (frame_prob > threshold).cpu().numpy()
+    # Convert logits to probabilities so threshold is interpreted consistently.
+    on_pred = (torch.sigmoid(on_prob) > threshold).cpu().numpy()
+    off_pred = (torch.sigmoid(off_prob) > threshold).cpu().numpy()
+    frame_pred = (torch.sigmoid(frame_prob) > threshold).cpu().numpy()
     
     # Slice pitches
     frame_pred = frame_pred[:, pitch_lo:pitch_hi+1].T
@@ -424,9 +439,12 @@ def continue_training(model_path, additional_epochs, device=DEVICE):
     
     print(f"Continued model saved to: {model_path}")
 
-def test_model(model_path, num_samples=5, device=DEVICE):
-    """Test a saved model by displaying true and predicted labels."""
-    model = load_model_checkpoint(model_path, device)
+def test_model(model_or_path, num_samples=5, device=DEVICE, threshold=0.4):
+    """Test a saved model path or an already loaded model by displaying predictions."""
+    if isinstance(model_or_path, torch.nn.Module):
+        model = model_or_path.to(device)
+    else:
+        model = load_model_checkpoint(model_or_path, device)
     model.eval()
     
     cache_dataset = CashDataset(CACHE_PATH)
@@ -454,19 +472,111 @@ def test_model(model_path, num_samples=5, device=DEVICE):
             true_on = y["on"][0].detach().cpu()
             pred_off = out["off"][0].detach().cpu()
             true_off = y["off"][0].detach().cpu()
+            pred_on_binary = (torch.sigmoid(pred_on) > threshold)
+            pred_off_binary = (torch.sigmoid(pred_off) > threshold)
+            pred_frame_binary = (torch.sigmoid(pred_frame) > threshold)
             
             print(f"Sample {i+1} - True Label:")
-            show_on_off_overlay(true_frame, 12, 21, 108)
+            show_on_off_overlay(true_frame, 12, 21, 108, title="True Frame Label")
             
-            print(f"Sample {i+1} - Predicted Frame Distribution:")
-            show_on_off_overlay(pred_frame, 12, 21, 108)
+            print(
+                f"Sample {i+1} - Thresholded positives @ {threshold}: "
+                f"frame={int(pred_frame_binary.sum().item())}, "
+                f"onset={int(pred_on_binary.sum().item())}, "
+                f"offset={int(pred_off_binary.sum().item())}"
+            )
+            print(f"Sample {i+1} - Predicted Frame Mask:")
+            show_on_off_overlay(
+                pred_frame_binary.float(),
+                12,
+                21,
+                108,
+                title=f"Predicted Frame Mask (threshold={threshold})",
+            )
             
             print(f"Sample {i+1} - Predicted Label:")
-            show_on_off_predictions(pred_on, pred_off, pred_frame, threshold=0.5, S=12, pitch_lo=21, pitch_hi=108)
+            show_on_off_predictions(pred_on, pred_off, pred_frame, threshold=threshold, S=SUBDIVISIONS_PER_BEAT, pitch_lo=21, pitch_hi=108)
+
+def _f1_from_binary_tensors(true_tensor, pred_tensor):
+    true_tensor = true_tensor.float().flatten()
+    pred_tensor = pred_tensor.float().flatten()
+
+    tp = (true_tensor * pred_tensor).sum().float()
+    fp = ((1 - true_tensor) * pred_tensor).sum().float()
+    fn = (true_tensor * (1 - pred_tensor)).sum().float()
+
+    precision = tp / (tp + fp + 1e-7)
+    recall = tp / (tp + fn + 1e-7)
+    f1 = 2 * precision * recall / (precision + recall + 1e-7)
+    return {
+        'precision': precision.item(),
+        'recall': recall.item(),
+        'f1': f1.item(),
+    }
+
+
+def _extract_note_events(on_tensor, off_tensor, frame_tensor):
+    on_array = on_tensor.bool().cpu().numpy()
+    off_array = off_tensor.bool().cpu().numpy()
+    frame_array = frame_tensor.bool().cpu().numpy()
+    n_steps, n_pitches = frame_array.shape
+    note_events = []
+
+    for pitch in range(n_pitches):
+        on_pitch = on_array[:, pitch]
+        off_pitch = off_array[:, pitch]
+        frame_pitch = frame_array[:, pitch]
+        active_start = None
+        for step in range(n_steps):
+            onset_here = on_pitch[step]
+            offset_here = off_pitch[step]
+            frame_here = frame_pitch[step]
+
+            if active_start is None and (onset_here or frame_here):
+                active_start = step
+
+            if active_start is not None and offset_here:
+                note_events.append((pitch, active_start, step))
+                active_start = None
+                continue
+
+            if active_start is not None:
+                next_frame_here = False
+                if step + 1 < n_steps:
+                    next_frame_here = frame_pitch[step + 1]
+                if not frame_here and not onset_here:
+                    note_events.append((pitch, active_start, step))
+                    active_start = None
+                elif frame_here and not next_frame_here:
+                    note_events.append((pitch, active_start, step))
+                    active_start = None
+
+        if active_start is not None:
+            note_events.append((pitch, active_start, n_steps - 1))
+
+    return set(note_events)
+
+
+def _note_f1_from_events(true_events, pred_events):
+    tp = len(true_events & pred_events)
+    fp = len(pred_events - true_events)
+    fn = len(true_events - pred_events)
+
+    precision = tp / (tp + fp + 1e-7)
+    recall = tp / (tp + fn + 1e-7)
+    f1 = 2 * precision * recall / (precision + recall + 1e-7)
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'true_notes': len(true_events),
+        'pred_notes': len(pred_events),
+    }
+
 
 def compute_f1_score(model, dataloader, threshold=0.5, device=DEVICE):
     """
-    Compute F1 score for the 'frame' predictions of the model.
+    Compute per-sample averaged onset, frame, and offset F1 metrics.
     
     Args:
         model: Trained OnsetAndFrames model
@@ -475,32 +585,59 @@ def compute_f1_score(model, dataloader, threshold=0.5, device=DEVICE):
         device: Device to run on
     
     Returns:
-        F1 score (float)
+        Dictionary with final per-sample-averaged F1 values.
     """
     model.eval()
-    all_true = []
-    all_pred = []
-    with torch.no_grad():
+    average_sums = {
+        'onset': 0.0,
+        'frame': 0.0,
+        'offset': 0.0,
+    }
+    num_samples = 0
+
+    with torch.inference_mode():
         for x, labels in tqdm(dataloader, desc="Computing F1", unit="batch"):
             x = x.to(device, dtype=torch.float32)
             out = model(x)
-            pred_frame = torch.sigmoid(out['frame']) > threshold
-            true_frame = labels['frame']
-            all_true.append(true_frame.cpu().float().flatten())
-            all_pred.append(pred_frame.cpu().float().flatten())
-    
-    all_true = torch.cat(all_true)
-    all_pred = torch.cat(all_pred)
-    
-    tp = (all_true * all_pred).sum().float()
-    fp = ((1 - all_true) * all_pred).sum().float()
-    fn = (all_true * (1 - all_pred)).sum().float()
-    
-    precision = tp / (tp + fp + 1e-7)
-    recall = tp / (tp + fn + 1e-7)
-    f1 = 2 * precision * recall / (precision + recall + 1e-7)
-    
-    return f1.item()
+
+            pred_on = (torch.sigmoid(out['on']) > threshold).cpu()
+            pred_off = (torch.sigmoid(out['off']) > threshold).cpu()
+            pred_frame = (torch.sigmoid(out['frame']) > threshold).cpu()
+
+            true_on = labels['on'].cpu().bool()
+            true_off = labels['off'].cpu().bool()
+            true_frame = labels['frame'].cpu().bool()
+
+            for true_on_sample, true_off_sample, true_frame_sample, pred_on_sample, pred_off_sample, pred_frame_sample in zip(
+                true_on,
+                true_off,
+                true_frame,
+                pred_on,
+                pred_off,
+                pred_frame,
+            ):
+                average_sums['onset'] += _f1_from_binary_tensors(true_on_sample, pred_on_sample)['f1']
+                average_sums['frame'] += _f1_from_binary_tensors(true_frame_sample, pred_frame_sample)['f1']
+                average_sums['offset'] += _f1_from_binary_tensors(true_off_sample, pred_off_sample)['f1']
+                num_samples += 1
+
+    return {
+        'onset_f1': average_sums['onset'] / num_samples if num_samples else 0.0,
+        'frame_f1': average_sums['frame'] / num_samples if num_samples else 0.0,
+        'offset_f1': average_sums['offset'] / num_samples if num_samples else 0.0,
+    }
+
+
+def compute_f1_from_model_path(model_path, threshold=0.5, batch_size=1, device=DEVICE):
+    model = load_model_checkpoint(model_path, device=device)
+    dataloader = DataLoader(
+        CashDataset(CACHE_PATH),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=1,
+        pin_memory=True,
+    )
+    return compute_f1_score(model, dataloader, threshold=threshold, device=device)
 
 def main() :
     midi_path  = os.path.join(MAESTRO_ROOT, "2018", 
@@ -516,12 +653,18 @@ def main() :
     
     # loss: 0.046184, f1: 0.7274966239929199
     #test_model_path = 'model_weights/onset_and_frames_20260309_181510.pth' 
-    #test_model(test_model_path)
+    best_model = 'model_weights/best_model.pth'
+    print(best_model)
+    test_model(best_model, num_samples=3, device=DEVICE, threshold=0.5)
     #continue_training(test_model_path, additional_epochs=10)
-    test_training()
+    #test_training()
     #model = load_model_checkpoint(test_model_path)
     # .6 best so far
-    #print(compute_f1_score(model, dataloader, threshold=0.5))
+    # .5
+    # 0.1: {'onset_f1': 0.8597313248228593, 'frame_f1': 0.9005319844492063, 'offset_f1': 0.43945023072334954}
+    # 0.3: {'onset_f1': 0.8955431835154148, 'frame_f1': 0.9358091985136024, 'offset_f1': 0.45298139032020535}
+    # 0.5: {'onset_f1': 0.8963212741189385, 'frame_f1': 0.9474625471840529, 'offset_f1': 0.38025475321433544}
+    print(compute_f1_from_model_path(best_model, threshold=0.5, batch_size=1, device=DEVICE))
     #display_transformed_dataset(3)
     """
     cache_data(metadata=metadata, root_dir=MAESTRO_ROOT, cache_dir=CACHE_PATH, mel_tx=mel_tx, n_mels=N_MELS, 

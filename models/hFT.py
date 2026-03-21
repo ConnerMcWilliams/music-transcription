@@ -48,9 +48,9 @@ class FeedForward(nn.Module):
 
 class AxisTransformerBlock(nn.Module):
     """
-    Generic transformer block applied along one axis.
-    Input: [N, L, D]
-    Output: [N, L, D]
+        Generic transformer block applied along one axis.
+        Input: [N, L, D]
+        Output: [N, L, D]
     """
     def __init__(self, dim, num_heads=8, dropout=0.1, ff_mult=4):
         super().__init__()
@@ -135,6 +135,11 @@ class AMTEncoder(nn.Module):
             x = block(x)
         x = self.out_norm(x)
         return x  # [B, C, T, F_out]
+    
+# Encoder: latent space to understand rhythmic patterns
+# Decoder: Output rhymic patterns
+
+# Experiment and metric
     
 class PianoHeads(nn.Module):
     def __init__(self, dim, n_mels, n_pitches=88):

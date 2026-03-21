@@ -14,11 +14,6 @@ CACHE_PATH = os.path.join(PROJECT_ROOT, "dataset", "transformed_data")
 # ==========================
 # DATA / AUDIO PARAMETERS
 # ==========================
-SAMPLES_PER_CLIP = 80_000
-FRAMES_PER_CLIP  = 500
-BEATS_PER_CLIP = 8
-SUBDIVISIONS_PER_BEAT = 12
-FRAME_RATE = 100
 
 # ==========================
 # DATALOADER PARAMETERS
@@ -51,16 +46,51 @@ GENERATOR: Optional[torch.Generator] = None  # for deterministic shuffling
 # ==========================
 # AUDIO / FEATURE EXTRACTION
 # ==========================
-SAMPLE_RATE     = 16000
-N_FFT           = 2048
-HOP_LENGTH      = 160
-WIN_LENGTH      = 2048
-N_MELS          = 229
-F_MIN           = 30.0
-F_MAX           = SAMPLE_RATE / 2
-WINDOW_FN       = "hann"
-POWER           = 2.0
-LOG_OFFSET      = 1e-6
+# 320 / 16000 = 0.2 ms vs 160 / 16000 = 0.1 ms
+# N ~ 16000 / 320 = 50 vs 16000 / 160 = 100
+sample_rate = 16000
+coarse_spectrogram = {
+    "SAMPLE_RATE"   : sample_rate, 
+    "N_FFT"         : 1024,
+    "HOP_LENGTH"    : 320,
+    "WIN_LENGTH"    : 1024,
+    "N_MELS"        : 128, 
+    "F_MIN"         : 30.0,
+    "F_MAX"         : sample_rate / 2,
+    "WINDOW_FN"     : "hann",
+    "POWER"         : 2.0,
+    "LOG_OFFSET"    : 1e-6
+}
+
+# 160 / 22050 < 0.1 ms
+# N ~ 
+sample_rate = 22050
+high_def_spectrogram = {
+    "SAMPLE_RATE"   : sample_rate, 
+    "N_FFT"         : 2048,
+    "HOP_LENGTH"    : 160,
+    "WIN_LENGTH"    : 1024,
+    "N_MELS"        : 229,
+    "F_MIN"         : 30.0,
+    "F_MAX"         : sample_rate / 2,
+    "WINDOW_FN"     : "hann",
+    "POWER"         : 2.0,
+    "LOG_OFFSET"    : 1e-6
+}
+
+beat_normalized_spectrogram = {
+    "BEATS_PER_CLIP"        : 8,
+    "SUBDIVISIONS_PER_BEAT" : 12,
+    "FRAME_RATE"            : 100
+}
+
+coarse_MIDI = {
+    
+}
+
+beat_normalized_MIDI = {
+    
+}
 
 # ==========================
 # TRAINING HYPERPARAMETERS
@@ -94,27 +124,4 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 # ==========================
 # EXPERIMENT VARIANTS
 # ==========================
-class ModelConfig(TypedDict):
-    type: str  # e.g., "BasicAMTTransformer"
 
-class OptimizerConfig(TypedDict):
-    type: str  # e.g., "AdamW"
-    lr: float
-
-class SchedulerConfig(TypedDict):
-    type: Literal["onecycle", "cosine_warmup", "plateau"]
-
-class VariantConfig(TypedDict):
-    name: str
-    model: ModelConfig
-    optimizer: OptimizerConfig
-    scheduler: SchedulerConfig
-
-MODEL_VARIANTS = [
-    {
-        "name": "OAF_max3e-3",
-        "model": {"type": "OnsetAndFrames"},
-        "optimizer": {"type": "AdamW", "lr": 3e-3},
-        "scheduler": {"type": "onecycle"},
-    }
-]
