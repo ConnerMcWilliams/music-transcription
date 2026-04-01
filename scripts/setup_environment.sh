@@ -1,4 +1,4 @@
-MINI_DIR=$(pwd)../miniconda3
+MINI_DIR=$(pwd)/../miniconda3
 
 if test -f "$MINI_DIR"; then
     echo "$MINI_DIR exists"
