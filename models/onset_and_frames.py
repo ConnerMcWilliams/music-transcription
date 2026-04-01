@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Optional
 import torch.nn.functional as F
-from config import (SUBDIVISIONS_PER_BEAT, BEATS_PER_CLIP, BATCH_SIZE, N_MELS)
+from experiment.config import (SUBDIVISIONS_PER_BEAT, BEATS_PER_CLIP, BATCH_SIZE, N_MELS)
 
 #d_model = dimensions of each embedding
 class PatchEmbed2D(nn.Module):

@@ -1,4 +1,5 @@
 # dataset_beats.py
+import argparse
 import os
 import numpy as np
 from typing import Optional, Callable, Tuple, Dict, Any
@@ -261,13 +262,10 @@ def _process_file_worker(worker_args):
             ts_target, max_value = build_subdivision_times(beats, S, start_beat_idx, num_beats)
             
             if ts_target is None:
-                # Empty window
-                mel = torch.zeros(1, n_mels, L, dtype=torch.float32)
-                zeros = torch.zeros(L, 128, dtype=torch.float32)
-                labels = {"on": zeros.clone(), "off": zeros.clone(), "frame": zeros.clone()}
-                pickle_spectrogram(mel, labels, window_idx, cache_dir)
-                windows_processed += 1
-                continue
+                raise ValueError(
+                    f"Invalid beat window: row_idx={row_idx}, start_beat_idx={start_beat_idx}, "
+                    f"num_beats={num_beats}, len(beats)={len(beats)}, midi_path={midi_path}"
+                )
             
             # Warp mel to beat grid
             mel_beat = linear_time_warp_mel(mel_time, ts_target, dt)
@@ -298,8 +296,13 @@ def _process_file_worker(worker_args):
                 "frame": frm_t.contiguous()
             }
             
+            metadata = {
+                "times" : ts_target,
+                "max_time" : max_value
+            }
+            
             mel = mel_beat.to(torch.float32).unsqueeze(0).contiguous()
-            pickle_spectrogram(mel, labels, window_idx, cache_dir)
+            pickle_spectrogram(mel, labels, window_idx, cache_dir, metadata)
             windows_processed += 1
         
         return (windows_processed, row_idx)
@@ -326,3 +329,28 @@ def pickle_spectrogram(mel, labels, index, cache_dir, extra=None) :
             pickle.dump(extra, file, protocol=4)
         
     return
+
+if __name__ == "__main__" :
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-d_list', help='corpus list directory')
+    parser.add_argument('-d_midi', help='midi file directory (input)')
+    parser.add_argument('-d_note', help='note file directory (input)')
+    parser.add_argument('-d_norm_midi', 
+                        help='normalized midi file directory (output)')
+    parser.add_argument('-d_norm_note', 
+                        help='normalized note file directory (output)')
+    parser.add_argument('-d_norm_spec', 
+                        help='normalized spectrogram file directory (output)')
+    parser.add_argument('-config', help='config file')
+    
+    args = parser.parse_args()
+    
+    print('** conv_midi2note: convert midi to note **')
+    print(' directory')
+    print('  midi (input)  : '+str(args.d_midi))
+    print('  note (input) : '+str(args.d_note))
+    
+    print('  corpus list   : '+str(args.d_list))
+    print(' config file    : '+str(args.config))
+    
+    print('')

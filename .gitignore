@@ -1,3 +1,10 @@
 *.pkl
 *.midi
 *.wav
+__pycache__
+.vscode
+.idea
+*.txt
+*.png
+*.pdf
+*.pth

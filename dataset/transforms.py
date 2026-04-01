@@ -9,7 +9,7 @@ import torchaudio
 import bisect
 import numpy as np
 
-from config import (
+from experiment.config import (
     SAMPLE_RATE,
     N_FFT,
     HOP_LENGTH,

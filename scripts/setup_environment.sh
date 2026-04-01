@@ -8,4 +8,4 @@ conda init bash
 exec bash
 
 conda env create -f environment.yml
-conda activate music-transcriber
+conda activate mamba-amt

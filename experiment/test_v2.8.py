@@ -24,14 +24,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from pretty_midi import PrettyMIDI
 
-from dataset.cache_data import cache_data
+from dataset.cache_norm import cache_data
 from dataset.transforms import MelTransform
-from dataset.cash_dataset import CashDataset
+from dataset.cashe_dataset import CashDataset
 from utils.display_midi import display_spectrogram, display_midi_from_roll
-from models.loss import OnsetsAndFramesLoss, OnsetsAndFramesPaperLoss
+from components.loss import OnsetsAndFramesLoss, OnsetsAndFramesPaperLoss
 from models.hFT import HFTModel
-from schedulers import make_optimizer, make_scheduler
-from config import (CSV_PATH, N_MELS, CACHE_PATH, BATCH_SIZE, DEVICE,
+from components.schedulers import make_optimizer, make_scheduler
+from experiment.config import (CSV_PATH, N_MELS, CACHE_PATH, BATCH_SIZE, DEVICE,
                     CSV_PATH, MAESTRO_ROOT, BEATS_PER_CLIP, NUM_EPOCHS,
                     SUBDIVISIONS_PER_BEAT, HOP_LENGTH, SAMPLE_RATE,)
 

@@ -79,7 +79,6 @@ def build_subdivision_times(beats_target_loco, S, start_beat_idx, num_beats):
     k1 = min(len(beats_target_loco)-1, k0 + num_beats)  # we need k..k+num_beats (so at least k+1 exists)
     # Guard: ensure we have enough beats to define segments
     if k1 <= k0:
-        print('AHHHHHHHHHHHHHHHHHHHHH')
         return None, None  # caller will handle
     seg_beats = beats_target_loco[k0:k1+1]  # length num_beats+1
     out = []
