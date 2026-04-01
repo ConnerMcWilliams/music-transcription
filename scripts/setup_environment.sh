@@ -1,17 +1,28 @@
-MINI_DIR=$(pwd)/../miniconda3
+#!/usr/bin/env bash
+set -e
 
-if test -f "$MINI_DIR"; then
-    echo "$MINI_DIR exists"
-else 
-    echo "$MINI_DIR does not exist. Downloading..."    
-    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+MINI_DIR="$(pwd)/../conda"
+INSTALLER="Miniconda3-latest-Linux-x86_64.sh"
+
+mkdir -p "$MINI_DIR"
+
+if [ -f "$INSTALLER" ]; then
+    echo "$INSTALLER already exists"
+else
+    echo "Downloading Miniconda installer..."
+    wget "https://repo.anaconda.com/miniconda/$INSTALLER" -O "$INSTALLER"
 fi
-bash Miniconda3-latest-Linux-x86_64.sh -b -p $MINI_DIR
 
-source $MINI_DIR/etc/profile.d/conda.sh
-conda init bash
+if [ -d "$MINI_DIR" ] && [ -f "$MINI_DIR/bin/conda" ]; then
+    echo "Miniconda already installed at $MINI_DIR"
+else
+    echo "Installing Miniconda..."
+    bash "$INSTALLER" -b -p "$MINI_DIR"
+fi
 
-exec bash
+source "$MINI_DIR/etc/profile.d/conda.sh"
 
-conda env create -f environment.yml
+conda env create -f environment.yml || conda env update -f environment.yml
 conda activate mamba-amt
+
+echo "Environment activated: $CONDA_DEFAULT_ENV"
