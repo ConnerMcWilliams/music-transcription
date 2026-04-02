@@ -1,9 +1,23 @@
 ## MAESTRO v3.0.0
 CURRENT_DIR=$(pwd)
-DATASET_SCRIPTS=$CURRENT_DIR../dataset
+# Scripts -> 'Music Transcription' -> dataset
+DATASET_SCRIPTS=$CURRENT_DIR/../dataset
+# Scripts -> 'Music Transcription' -> dataset -> corpus -> MAESTRO-V3
+CORPUS_DIR=$CURRENT_DIR/../dataset/corpus
+MAESTRO_DIR=$CORPUS_DIR/MAESTRO-V3
+LIST_DIR=$MAESTRO_DIR/list
+MIDI_DIR=$MAESTRO_DIR/midi
+WAV_DIR=$MAESTRO_DIR/wav
+FEATURE_DIR=$MAESTRO_DIR/feature
+NOTE_DIR=$MAESTRO_DIR/note
+LABEL_DIR=$MAESTRO_DIR/label
+NORM_DIR=$MAESTRO_DIR/norm
+REFERENCE_DIR=$MAESTRO_DIR/reference
+DATASET_DIR=$MAESTRO_DIR/dataset
+CONFIG_FILE=$CURRENT_DIR/corpus/config.json
 
 # 1. download MAESTRO v3.0.0 data and expand them
-mkdir -p $CURRENT_DIR/MAESTRO-V3
+mkdir -p $MAESTRO_DIR
 
 FILE=./maestro-v3.0.0.zip
 if test -f "$FILE"; then
@@ -13,43 +27,40 @@ else
     wget https://storage.googleapis.com/magentadata/datasets/maestro/v3.0.0/maestro-v3.0.0.zip ./
 fi
 
-MAESTRO_DIR=$CURRENT_DIR/MAESTRO-V3
-
-unzip maestro-v3.0.0.zip -d $MAESTRO_DIR/corpus
-# $ ($CURRENT_DIR/corpus/MAESTRO-V3/maestro-v3.0.0)
+unzip maestro-v3.0.0.zip -d $CORPUS_DIR
+# ($CORPUS_DIR/maestro-v3.0.0)
 
 # 2. make lists that include train/valid/test split
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/list
-python $DATASET_SCRIPTS/make_list_maestro.py -i $MAESTRO_DIR/maestro-v3.0.0.csv
+mkdir -p $LIST_DIR
+python $DATASET_SCRIPTS/make_list_maestro.py -i $MAESTRO_DIR/maestro-v3.0.0/maestro-v3.0.0.csv
 
 # 3. rename the files
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/midi
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/wav
-python3 $CURRENT_DIR/corpus/rename_maestro.py -d_i $CURRENT_DIR/corpus/MAESTRO-V3/maestro-v3.0.0 -d_o $CURRENT_DIR/corpus/MAESTRO-V3 -d_list $CURRENT_DIR/corpus/MAESTRO-V3/list
+mkdir -p $MIDI_DIR
+mkdir -p $WAV_DIR
+python3 $DATASET_SCRIPTS/rename_maestro.py -d_i $MAESTRO_DIR/maestro-v3.0.0 -d_o $MAESTRO_DIR -d_list $LIST_DIR
 
 # 4. convert wav to log-mel spectrogram
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/feature
-python3 $CURRENT_DIR/corpus/conv_wav2fe.py -d_list $CURRENT_DIR/corpus/MAESTRO-V3/list -d_wav $CURRENT_DIR/corpus/MAESTRO-V3/wav -d_feature $CURRENT_DIR/corpus/MAESTRO-V3/feature -config $CURRENT_DIR/corpus/config.json
+mkdir -p $FEATURE_DIR
+python3 $DATASET_SCRIPTS/conv_wav2fe.py -d_list $LIST_DIR -d_wav $WAV_DIR -d_feature $FEATURE_DIR -config $CONFIG_FILE
 
 # 5. convert midi to note
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/note
-python3 $CURRENT_DIR/corpus/conv_midi2note.py -d_list $CURRENT_DIR/corpus/MAESTRO-V3/list -d_midi $CURRENT_DIR/corpus/MAESTRO-V3/midi -d_note $CURRENT_DIR/corpus/MAESTRO-V3/note -config $CURRENT_DIR/corpus/config.json
+mkdir -p $NOTE_DIR
+python3 $DATASET_SCRIPTS/conv_midi2note.py -d_list $LIST_DIR -d_midi $MIDI_DIR -d_note $NOTE_DIR -config $CONFIG_FILE
 
 # 6. convert note to label
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/label
-python3 $CURRENT_DIR/corpus/conv_note2label.py -d_list $CURRENT_DIR/corpus/MAESTRO-V3/list -d_note $CURRENT_DIR/corpus/MAESTRO-V3/note -d_label $CURRENT_DIR/corpus/MAESTRO-V3/label -config $CURRENT_DIR/corpus/config.json
+mkdir -p $LABEL_DIR
+python3 $DATASET_SCRIPTS/conv_note2label.py -d_list $LIST_DIR -d_note $NOTE_DIR -d_label $LABEL_DIR -config $CONFIG_FILE
 
 # 7. normalize and cache everything
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/norm
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/norm/feature
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/norm/label
+mkdir -p $NORM_DIR/feature
+mkdir -p $NORM_DIR/label
 python $DATASET_SCRIPTS/cache_norm.py
 
 # 8. convert txt to reference for evaluation
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/reference
-python3 $CURRENT_DIR/corpus/conv_note2ref.py -f_list $CURRENT_DIR/corpus/MAESTRO-V3/list/valid.list -d_note $CURRENT_DIR/corpus/MAESTRO-V3/note -d_ref $CURRENT_DIR/corpus/MAESTRO-V3/reference
-python3 $CURRENT_DIR/corpus/conv_note2ref.py -f_list $CURRENT_DIR/corpus/MAESTRO-V3/list/test.list -d_note $CURRENT_DIR/corpus/MAESTRO-V3/note -d_ref $CURRENT_DIR/corpus/MAESTRO-V3/reference
+mkdir -p $REFERENCE_DIR
+python3 $DATASET_SCRIPTS/conv_note2ref.py -f_list $LIST_DIR/valid.list -d_note $NOTE_DIR -d_ref $REFERENCE_DIR
+python3 $DATASET_SCRIPTS/conv_note2ref.py -f_list $LIST_DIR/test.list -d_note $NOTE_DIR -d_ref $REFERENCE_DIR
 
 # 9. make dataset
-mkdir -p $CURRENT_DIR/corpus/MAESTRO-V3/dataset
-python3 $CURRENT_DIR/corpus/make_dataset.py -f_config_in $CURRENT_DIR/corpus/config.json -f_config_out $CURRENT_DIR/corpus/MAESTRO-V3/dataset/config.json -d_dataset $CURRENT_DIR/corpus/MAESTRO-V3/dataset -d_list $CURRENT_DIR/corpus/MAESTRO-V3/list -d_feature $CURRENT_DIR/corpus/MAESTRO-V3/feature -d_label $CURRENT_DIR/corpus/MAESTRO-V3/label -n_div_train 4 -n_div_valid 1 -n_div_test 1
+mkdir -p $DATASET_DIR
+python3 $DATASET_SCRIPTS/make_dataset.py -f_config_in $CONFIG_FILE -f_config_out $DATASET_DIR/config.json -d_dataset $DATASET_DIR -d_list $LIST_DIR -d_feature $FEATURE_DIR -d_label $LABEL_DIR -n_div_train 4 -n_div_valid 1 -n_div_test 1
