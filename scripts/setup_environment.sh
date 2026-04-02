@@ -13,11 +13,11 @@ else
     wget "https://repo.anaconda.com/miniconda/$INSTALLER" -O "$INSTALLER"
 fi
 
-if [ -d "$MINI_DIR" ] && [ -f "$MINI_DIR/bin/conda" ]; then
+if [ -f "$MINI_DIR/bin/conda" ]; then
     echo "Miniconda already installed at $MINI_DIR"
 else
     echo "Installing Miniconda..."
-    bash "$INSTALLER" -b -p "$MINI_DIR"
+    bash "$INSTALLER" -u -b -p "$MINI_DIR"
 fi
 
 source "$MINI_DIR/etc/profile.d/conda.sh"
