@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-MINI_DIR="$(pwd)/../conda"
+CURRENT_DIR="$(pwd)"
+MINI_DIR="$CURRENT_DIR/../conda"
 INSTALLER="Miniconda3-latest-Linux-x86_64.sh"
+EVIRONMENT_DIR="$CURRENT_DIR/../environment.yml"
 
 mkdir -p "$MINI_DIR"
 
@@ -22,7 +24,7 @@ fi
 
 source "$MINI_DIR/etc/profile.d/conda.sh"
 
-conda env create -f environment.yml || conda env update -f environment.yml
+conda env create -f $EVIRONMENT_DIR || conda env update -f $EVIRONMENT_DIR
 conda activate mamba-amt
 
 echo "Environment activated: $CONDA_DEFAULT_ENV"
