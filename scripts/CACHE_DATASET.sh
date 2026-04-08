@@ -27,7 +27,11 @@ else
     wget https://storage.googleapis.com/magentadata/datasets/maestro/v3.0.0/maestro-v3.0.0.zip ./
 fi
 
-unzip maestro-v3.0.0.zip -d $CORPUS_DIR
+if test -d "$CORPUS_DIR/maestro-v3.0.0"; then
+    echo "$CORPUS_DIR/maestro-v3.0.0 already exists, skipping unzip"
+else
+    unzip maestro-v3.0.0.zip -d $CORPUS_DIR
+fi
 # ($CORPUS_DIR/maestro-v3.0.0)
 
 # 2. make lists that include train/valid/test split
