@@ -14,7 +14,9 @@ LABEL_DIR=$MAESTRO_DIR/label
 NORM_DIR=$MAESTRO_DIR/norm
 REFERENCE_DIR=$MAESTRO_DIR/reference
 DATASET_DIR=$MAESTRO_DIR/dataset
-CONFIG_FILE=$CURRENT_DIR/corpus/config.json
+CONFIG_FILE=$$DATASET_DIR/config.json
+
+export PYTHONPATH=$CURRENT_DIR/..
 
 # 1. download MAESTRO v3.0.0 data and expand them
 mkdir -p $MAESTRO_DIR
@@ -43,9 +45,13 @@ python $DATASET_SCRIPTS/make_list_maestro.py \
 # 3. rename the files
 mkdir -p $MIDI_DIR
 mkdir -p $WAV_DIR
-python $DATASET_SCRIPTS/rename_maestro.py -d_i $CORPUS_DIR/maestro-v3.0.0 \
-    -d_o $MAESTRO_DIR \
-    -d_list $LIST_DIR
+if [ "$(ls -A $WAV_DIR 2>/dev/null)" ]; then
+    echo "WAV/MIDI symlinks already exist, skipping rename"
+else
+    python $DATASET_SCRIPTS/rename_maestro.py -d_i $CORPUS_DIR/maestro-v3.0.0 \
+        -d_o $MAESTRO_DIR \
+        -d_list $LIST_DIR
+fi
 
 # 4. convert wav to log-mel spectrogram
 mkdir -p $FEATURE_DIR
@@ -56,14 +62,14 @@ python $DATASET_SCRIPTS/conv_wav2fe.py -d_list $LIST_DIR \
 
 # 5. convert midi to note
 mkdir -p $NOTE_DIR
-python $DATASET_SCRIPTS/conv_midi2note.py -d_list $LIST_DIR \
+python $DATASET_SCRIPTS/midi2note.py -d_list $LIST_DIR \
     -d_midi $MIDI_DIR \
     -d_note $NOTE_DIR \
     -config $CONFIG_FILE
 
 # 6. convert note to label
 mkdir -p $LABEL_DIR
-python $DATASET_SCRIPTS/conv_note2label.py -d_list $LIST_DIR \
+python $DATASET_SCRIPTS/note2label.py -d_list $LIST_DIR \
     -d_note $NOTE_DIR \
     -d_label $LABEL_DIR \
     -config $CONFIG_FILE
@@ -79,6 +85,6 @@ python $DATASET_SCRIPTS/cache_spec.py \
 
 # 8. convert txt to reference for evaluation
 mkdir -p $REFERENCE_DIR
-python $DATASET_SCRIPTS/conv_note2ref.py -f_list $LIST_DIR/valid.list \
+python $DATASET_SCRIPTS/note2ref.py -f_list $LIST_DIR/valid.list \
     -d_note $NOTE_DIR \
     -d_ref $REFERENCE_DIR
