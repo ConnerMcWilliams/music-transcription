@@ -42,6 +42,9 @@ import torch
 from pretty_midi import PrettyMIDI
 from tqdm.auto import tqdm
 
+# Ensure project root is on sys.path so `dataset.*` / `utils.*` resolve
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from dataset.transforms import linear_time_warp_mel
 from utils.beat_utils import get_beats_and_downbeats, build_subdivision_times
 
@@ -484,9 +487,6 @@ def transform_spec_and_pickle(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Allow running as `python dataset/cache_spec.py` from the project root
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
     from experiment.config import coarse_spectrogram, beat_normalized_spectrogram
 
     parser = argparse.ArgumentParser(
