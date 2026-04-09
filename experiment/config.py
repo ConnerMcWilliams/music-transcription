@@ -65,7 +65,7 @@ coarse_spectrogram = {
 # 160 / 22050 < 0.1 ms
 # N ~ 
 sample_rate = 22050
-high_def_spectrogram = {
+HIGH_DEF_SPECTROGRAM = {
     "SAMPLE_RATE"   : sample_rate, 
     "N_FFT"         : 2048,
     "HOP_LENGTH"    : 160,

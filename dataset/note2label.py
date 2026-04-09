@@ -24,7 +24,7 @@ def note2label(config, f_note, offset_duration_tolerance_flag):
             max_offset = note['offset']
     
     nframe = int(max_offset * nframe_in_sec + 0.5) + 1
-    a_mpe = np.zeros((nframe, config['midi']['num_note']), dtype=np.bool)
+    a_mpe = np.zeros((nframe, config['midi']['num_note']), dtype=np.bool_)
     a_onset = np.zeros((nframe, config['midi']['num_note']), dtype=np.float32)
     a_offset = np.zeros((nframe, config['midi']['num_note']), dtype=np.float32)
     a_velocity = np.zeros((nframe, config['midi']['num_note']), dtype=np.int8)
