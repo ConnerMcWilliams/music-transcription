@@ -326,6 +326,9 @@ def _process_spec_worker(worker_args: tuple) -> Tuple[int, str]:
         with open(os.path.join(d_feature, fname + ".pkl"), "rb") as fh:
             spec = pickle.load(fh)
 
+        # conv_wav2fe.py saves (mel_db, hop_length) tuple
+        if isinstance(spec, (tuple, list)):
+            spec = spec[0]
         if not isinstance(spec, torch.Tensor):
             spec = torch.as_tensor(np.array(spec), dtype=torch.float32)
         if spec.dim() == 3:
