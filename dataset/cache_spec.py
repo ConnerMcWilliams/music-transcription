@@ -453,7 +453,7 @@ def transform_spec_and_pickle(
     # Execute
     if use_parallel and len(worker_args_list) > 1:
         if num_workers is None:
-            num_workers = os.cpu_count() or 1
+            num_workers = max(1, (os.cpu_count() or 2) - 1)
         print(f"Parallel caching: {num_workers} workers, {unprocessed} windows remaining")
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
