@@ -178,7 +178,7 @@ def transform_and_pickle(metadata, root_dir, cache_dir, index, mel_tx,
     if use_parallel and len(worker_args_list) > 1:
         # Parallel processing
         if num_workers is None:
-            num_workers = os.cpu_count() or 1
+            num_workers = max(1, (os.cpu_count() or 2) - 1)
         
         print(f"Starting parallel caching with {num_workers} workers ({total_unprocessed} windows remaining)")
         
