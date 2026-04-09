@@ -29,6 +29,8 @@ Label warping strategy:
 """
 
 import argparse
+import concurrent.futures
+import itertools
 import os
 import re
 import pickle
@@ -454,23 +456,39 @@ def transform_spec_and_pickle(
     if use_parallel and len(worker_args_list) > 1:
         if num_workers is None:
             num_workers = max(1, (os.cpu_count() or 2) - 1)
+        # Limit in-flight futures to avoid OOM from too many loaded spectrograms
+        max_pending = num_workers * 2
         print(f"Parallel caching: {num_workers} workers, {unprocessed} windows remaining")
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            futures = {
-                executor.submit(_process_spec_worker, a): a
-                for a in worker_args_list
-            }
             with tqdm(
                 total=unprocessed, desc="Caching (parallel)",
                 unit="window", dynamic_ncols=True,
             ) as pbar:
-                for future in as_completed(futures):
-                    try:
-                        n, _ = future.result()
-                        pbar.update(n)
-                    except Exception as e:
-                        print(f"Worker error: {e}")
+                pending = {}
+                it = iter(worker_args_list)
+
+                # Seed initial batch
+                for a in itertools.islice(it, max_pending):
+                    fut = executor.submit(_process_spec_worker, a)
+                    pending[fut] = a
+
+                while pending:
+                    done, _ = concurrent.futures.wait(
+                        pending, return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        del pending[future]
+                        try:
+                            n, _ = future.result()
+                            pbar.update(n)
+                        except Exception as e:
+                            print(f"Worker error: {e}")
+                        # Submit one more to replace the completed one
+                        a = next(it, None)
+                        if a is not None:
+                            fut = executor.submit(_process_spec_worker, a)
+                            pending[fut] = a
     else:
         print(f"Serial caching: {unprocessed} windows remaining")
         with tqdm(
