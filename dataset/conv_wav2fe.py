@@ -6,6 +6,7 @@ import pickle
 import sys
 import os
 sys.path.append(os.getcwd())
+import torchaudio
 from transforms import MelTransform
 
 
@@ -29,6 +30,8 @@ if __name__ == '__main__':
     with open(args.config, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
+    mel_transform = MelTransform()
+
     a_attribute = ['train', 'test', 'valid']
     for attribute in a_attribute:
         print('-'+attribute+'-')
@@ -40,7 +43,9 @@ if __name__ == '__main__':
             print(fname)
 
             # convert wav to feature
-            a_feature = MelTransform(args.d_wav.rstrip('/')+'/'+fname+'.wav')
+            wav_path = args.d_wav.rstrip('/')+'/'+fname+'.wav'
+            waveform, sr = torchaudio.load(wav_path)
+            a_feature = mel_transform(waveform, sr)
             with open(args.d_feature.rstrip('/')+'/'+fname+'.pkl', 'wb') as f:
                 pickle.dump(a_feature, f, protocol=4)
 

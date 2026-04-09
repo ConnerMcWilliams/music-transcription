@@ -38,22 +38,22 @@ class MelTransform:
 
     def __init__(self):
         # Build the torchaudio transform once and hold it as state
-        self.sample_rate = coarse_spectrogram.SAMPLE_RATE
-        self.hop_length = coarse_spectrogram.HOP_LENGTH
-        self.log_offset = coarse_spectrogram.LOG_OFFSET
+        self.sample_rate = coarse_spectrogram["SAMPLE_RATE"]
+        self.hop_length = coarse_spectrogram["HOP_LENGTH"]
+        self.log_offset = coarse_spectrogram["LOG_OFFSET"]
 
         self.mel_spect = torchaudio.transforms.MelSpectrogram(
-            sample_rate=coarse_spectrogram.SAMPLE_RATE,
-            n_fft=coarse_spectrogram.N_FFT,
-            hop_length=coarse_spectrogram.HOP_LENGTH,
-            win_length=coarse_spectrogram.WIN_LENGTH,
-            power=coarse_spectrogram.POWER,
+            sample_rate=coarse_spectrogram["SAMPLE_RATE"],
+            n_fft=coarse_spectrogram["N_FFT"],
+            hop_length=coarse_spectrogram["HOP_LENGTH"],
+            win_length=coarse_spectrogram["WIN_LENGTH"],
+            power=coarse_spectrogram["POWER"],
             center=True,
             pad_mode="reflect",
-            window_fn=coarse_spectrogram.WINDOW_FN,
-            n_mels=coarse_spectrogram.N_MELS,
-            f_min=coarse_spectrogram.F_MIN,
-            f_max=coarse_spectrogram.F_MAX,
+            window_fn=_get_window_fn(coarse_spectrogram["WINDOW_FN"]),
+            n_mels=coarse_spectrogram["N_MELS"],
+            f_min=coarse_spectrogram["F_MIN"],
+            f_max=coarse_spectrogram["F_MAX"],
             mel_scale="slaney",
             norm="slaney",
         )
