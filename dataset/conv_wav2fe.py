@@ -45,6 +45,9 @@ if __name__ == '__main__':
             # convert wav to feature
             wav_path = args.d_wav.rstrip('/')+'/'+fname+'.wav'
             waveform, sr = torchaudio.load(wav_path)
+            if sr != mel_transform.sample_rate:
+                waveform = torchaudio.functional.resample(waveform, sr, mel_transform.sample_rate)
+                sr = mel_transform.sample_rate
             a_feature = mel_transform(waveform, sr)
             with open(args.d_feature.rstrip('/')+'/'+fname+'.pkl', 'wb') as f:
                 pickle.dump(a_feature, f, protocol=4)
