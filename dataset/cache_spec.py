@@ -209,7 +209,7 @@ def build_spec_index(
             fnames = [line.rstrip("\n") for line in fh if line.strip()]
 
         for fname in fnames:
-            midi_path  = os.path.join(d_midi,    fname + ".midi")
+            midi_path  = os.path.join(d_midi,    fname + ".mid")
             spec_path  = os.path.join(d_feature, fname + ".pkl")
             label_path = os.path.join(d_label,   fname + ".pkl")
 
@@ -349,7 +349,7 @@ def _process_spec_worker(worker_args: tuple) -> Tuple[int, str]:
         labels_raw = {k: _to_tensor(v) for k, v in labels_raw.items()}
 
         # Load MIDI for beat times only
-        pm = PrettyMIDI(os.path.join(d_midi, fname + ".midi"))
+        pm = PrettyMIDI(os.path.join(d_midi, fname + ".mid"))
         beats, _ = get_beats_and_downbeats(pm)
 
         # Process each window

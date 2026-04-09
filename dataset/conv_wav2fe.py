@@ -5,9 +5,9 @@ import json
 import pickle
 import sys
 import os
-sys.path.append(os.getcwd())
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torchaudio
-from transforms import MelTransform
+from dataset.transforms import MelTransform
 
 
 if __name__ == '__main__':
