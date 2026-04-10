@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train FineAMT using experiment.py
+# Train FineAMT using experiment.py with DDP (multi-GPU)
 # Paths mirror the layout created by CACHE_DATASET.sh
 
 CURRENT_DIR=$(pwd)
@@ -15,25 +15,30 @@ CHECKPOINT_DIR=$CURRENT_DIR/../checkpoints
 
 export PYTHONPATH=$CURRENT_DIR/..
 
-python $CURRENT_DIR/../experiment/experiment.py \
+# Detect number of GPUs (default 2)
+NGPUS=${NGPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}
+NGPUS=${NGPUS:-1}
+
+torchrun --nproc_per_node=$NGPUS \
+    $CURRENT_DIR/../experiment/experiment.py \
     -d_list      $LIST_DIR \
     -d_feature   $FEATURE_DIR \
     -d_label     $LABEL_DIR \
     -d_midi      $MIDI_DIR \
     -d_cache     $NORM_DIR \
     --epochs        20 \
-    --batch_size    16 \
-    --lr            1e-4 \
-    --blocks        4 \
-    --dim           256 \
-    --feature_dim   512 \
+    --batch_size    64 \
+    --lr            3e-4 \
+    --blocks        8 \
+    --dim           512 \
+    --feature_dim   1024 \
     --scheduler     onecycle \
     --threshold     0.5 \
     --wandb_project fine-amt \
     --checkpoint_dir $CHECKPOINT_DIR \
-    --metadata_workers 4 \
-    --num_workers   4 \
+    --metadata_workers 8 \
+    --num_workers   8 \
     --prefetch_factor 4 \
     --grad_accum_steps 1 \
-    --metric_interval 4 \
+    --metric_interval 8 \
     --seed          0

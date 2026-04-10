@@ -126,8 +126,23 @@ class FineAMT(nn.Module):
         d_conv: int = 4,
         expand: int = 2,
         n_pitches: int = 128,
+        n_mels: int = 128,
+        label_pitch_dim: int = 88,
     ) -> None:
         super().__init__()
+
+        self.n_mels = n_mels
+        self.label_feature_dim = 4 * label_pitch_dim
+
+        # Trainable projections from raw features → feature_dim (run on GPU)
+        self.spec_proj = (
+            nn.Linear(n_mels, feature_dim, bias=False)
+            if n_mels != feature_dim else nn.Identity()
+        )
+        self.label_proj = (
+            nn.Linear(self.label_feature_dim, feature_dim, bias=False)
+            if self.label_feature_dim != feature_dim else nn.Identity()
+        )
 
         # Project dataset feature_dim → model dim (identity when equal)
         self.input_proj: nn.Module = (
@@ -174,8 +189,18 @@ class FineAMT(nn.Module):
             coarse_loss uses (type_ids == 0) mask against original_labels
             fine_loss   uses (type_ids == 1) mask against normalized_labels
         """
-        x        = batch["sequence"]   # [B, max_len, feature_dim]
+        x        = batch["sequence"]   # [B, max_len, max_dim]  (zero-padded raw features)
         type_ids = batch["type_ids"]   # [B, max_len]
+
+        # Per-token-type projection from raw features → feature_dim
+        n_mels = self.n_mels
+        label_dim = self.label_feature_dim
+        spec_mask  = (type_ids == 0).unsqueeze(-1)  # [B, max_len, 1]
+        beat_mask  = (type_ids == 1).unsqueeze(-1)
+
+        spec_feat  = self.spec_proj(x[..., :n_mels])        # [B, max_len, feature_dim]
+        label_feat = self.label_proj(x[..., :label_dim])     # [B, max_len, feature_dim]
+        x = spec_feat * spec_mask.float() + label_feat * beat_mask.float()
 
         # Input projection + type embedding
         x = self.input_proj(x)                                     # [B, max_len, dim]

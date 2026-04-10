@@ -15,7 +15,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import wandb
 from pretty_midi import PrettyMIDI
@@ -45,6 +48,34 @@ from utils.beat_utils import get_beats_and_downbeats
 
 # Label keys used for loss and frame-level metrics (excludes velocity)
 LABEL_KEYS = ("on", "off", "frame")
+
+
+# ---------------------------------------------------------------------------
+# Distributed helpers
+# ---------------------------------------------------------------------------
+
+def is_dist() -> bool:
+    """Return True when running inside a distributed process group."""
+    return dist.is_available() and dist.is_initialized()
+
+def is_main_process() -> bool:
+    """Return True when this process is rank 0 (or non-distributed)."""
+    return (not is_dist()) or dist.get_rank() == 0
+
+def setup_distributed():
+    """Initialise the NCCL process group for DDP.
+
+    torchrun sets LOCAL_RANK, RANK, WORLD_SIZE automatically.
+    """
+    if "RANK" not in os.environ:
+        return  # single-GPU fallback
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+
+def cleanup_distributed():
+    if is_dist():
+        dist.destroy_process_group()
 
 
 # ---------------------------------------------------------------------------
@@ -326,10 +357,12 @@ def save_checkpoint(
     path: str,
 ) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # Unwrap DDP wrapper if present
+    raw_model = model.module if hasattr(model, "module") else model
     torch.save(
         {
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": raw_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "metrics": metrics,
         },
@@ -585,14 +618,20 @@ def run(
     scaler: Optional[torch.amp.GradScaler] = None,
     grad_accum_steps: int = 1,
     metric_interval: int = 4,
+    train_sampler: Optional[DistributedSampler] = None,
 ) -> None:
     os.makedirs(checkpoint_dir, exist_ok=True)
     best_note_f1 = -1.0
 
     for epoch in range(1, num_epochs + 1):
-        print(f"\n{'=' * 60}")
-        print(f"Epoch {epoch}/{num_epochs}")
-        print(f"{'=' * 60}")
+        # Shuffle distributed sampler per epoch
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
+        if is_main_process():
+            print(f"\n{'=' * 60}")
+            print(f"Epoch {epoch}/{num_epochs}")
+            print(f"{'=' * 60}")
 
         # --- Train ---
         train_acc = MetricAccumulator(threshold, onset_tolerance)
@@ -611,48 +650,50 @@ def run(
 
         lr = optimizer.param_groups[0]["lr"]
 
-        # --- Console summary ---
-        print(f"  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr:.2e}")
-        for tag, m in [("train", train_metrics), ("val", val_metrics)]:
-            print(
-                f"  {tag}: on_f1={m['on_f1']:.3f}  frame_f1={m['frame_f1']:.3f}  "
-                f"off_f1={m['off_f1']:.3f}  note_f1={m['note_f1']:.3f}"
-            )
+        # --- Console summary (rank 0 only) ---
+        if is_main_process():
+            print(f"  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr:.2e}")
+            for tag, m in [("train", train_metrics), ("val", val_metrics)]:
+                print(
+                    f"  {tag}: on_f1={m['on_f1']:.3f}  frame_f1={m['frame_f1']:.3f}  "
+                    f"off_f1={m['off_f1']:.3f}  note_f1={m['note_f1']:.3f}"
+                )
 
-        # --- wandb ---
-        log_dict: Dict[str, float] = {
-            "epoch": float(epoch),
-            "lr": lr,
-            "train/loss": train_loss,
-            "val/loss": val_loss,
-        }
-        for tag, m in [("train", train_metrics), ("val", val_metrics)]:
-            for mk, mv in m.items():
-                log_dict[f"{tag}/{mk}"] = mv
-        wandb.log(log_dict, step=epoch)
+            # --- wandb ---
+            log_dict: Dict[str, float] = {
+                "epoch": float(epoch),
+                "lr": lr,
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+            }
+            for tag, m in [("train", train_metrics), ("val", val_metrics)]:
+                for mk, mv in m.items():
+                    log_dict[f"{tag}/{mk}"] = mv
+            wandb.log(log_dict, step=epoch)
 
-        # --- Visualization ---
-        log_visualizations(model, val_dataset, epoch, device, threshold)
+            # --- Visualization ---
+            log_visualizations(model, val_dataset, epoch, device, threshold)
 
-        # --- Checkpoint every epoch ---
-        ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
-        save_checkpoint(model, optimizer, epoch, val_metrics, ckpt_path)
+            # --- Checkpoint every epoch ---
+            ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
+            save_checkpoint(model, optimizer, epoch, val_metrics, ckpt_path)
 
-        # --- Milestone every 5 epochs ---
-        if epoch % 5 == 0:
-            mile_path = os.path.join(
-                checkpoint_dir, f"checkpoint_epoch_{epoch}_milestone.pt",
-            )
-            save_checkpoint(model, optimizer, epoch, val_metrics, mile_path)
+            # --- Milestone every 5 epochs ---
+            if epoch % 5 == 0:
+                mile_path = os.path.join(
+                    checkpoint_dir, f"checkpoint_epoch_{epoch}_milestone.pt",
+                )
+                save_checkpoint(model, optimizer, epoch, val_metrics, mile_path)
 
-        # --- Best model ---
-        if val_metrics["note_f1"] > best_note_f1:
-            best_note_f1 = val_metrics["note_f1"]
-            best_path = os.path.join(checkpoint_dir, "best_model.pt")
-            save_checkpoint(model, optimizer, epoch, val_metrics, best_path)
-            print(f"  ** New best model (note_f1={best_note_f1:.4f}) **")
+            # --- Best model ---
+            if val_metrics["note_f1"] > best_note_f1:
+                best_note_f1 = val_metrics["note_f1"]
+                best_path = os.path.join(checkpoint_dir, "best_model.pt")
+                save_checkpoint(model, optimizer, epoch, val_metrics, best_path)
+                print(f"  ** New best model (note_f1={best_note_f1:.4f}) **")
 
-    print(f"\nTraining complete.  Best val note_f1: {best_note_f1:.4f}")
+    if is_main_process():
+        print(f"\nTraining complete.  Best val note_f1: {best_note_f1:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +741,11 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=cfg.SEED)
     args = parser.parse_args()
 
+    # --- Distributed setup (no-op for single GPU) ---
+    setup_distributed()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
     # Reproducibility
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -707,7 +753,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    device = cfg.DEVICE
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
 
     # Performance: enable cudnn autotuner
     torch.backends.cudnn.benchmark = True
@@ -717,8 +763,9 @@ if __name__ == "__main__":
     beats_per_window = cfg.beat_normalized_spectrogram["BEATS_PER_CLIP"]
     hop_beats = beats_per_window  # non-overlapping windows
 
-    # Build metadata
-    print("Building metadata ...")
+    # Build metadata (all ranks build the same metadata)
+    if is_main_process():
+        print("Building metadata ...")
     metadata = build_metadata(
         args.d_list,
         args.d_feature,
@@ -730,8 +777,9 @@ if __name__ == "__main__":
         dt=dt,
         workers=args.metadata_workers,
     )
-    for sp in ("train", "test", "valid"):
-        print(f"  {sp}: {len(metadata[sp])} windows")
+    if is_main_process():
+        for sp in ("train", "test", "valid"):
+            print(f"  {sp}: {len(metadata[sp])} windows")
 
     # Datasets & loaders
     n_mels = cfg.coarse_spectrogram["N_MELS"]
@@ -746,14 +794,24 @@ if __name__ == "__main__":
 
     persistent = cfg.PERSISTENT_WORKERS and args.num_workers > 0
     prefetch = args.prefetch_factor if args.num_workers > 0 else None
+
+    # Use DistributedSampler when running with multiple GPUs
+    train_sampler: Optional[DistributedSampler] = None
+    val_sampler: Optional[DistributedSampler] = None
+    if is_dist():
+        train_sampler = DistributedSampler(train_ds, shuffle=True, drop_last=cfg.DROP_LAST_TRAIN)
+        val_sampler = DistributedSampler(val_ds, shuffle=False, drop_last=False)
+
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=args.num_workers,
         collate_fn=collate_refine,
         pin_memory=cfg.PIN_MEMORY,
-        drop_last=cfg.DROP_LAST_TRAIN,
+        pin_memory_device=device if cfg.PIN_MEMORY else "",
+        drop_last=cfg.DROP_LAST_TRAIN if train_sampler is None else False,
         persistent_workers=persistent,
         prefetch_factor=prefetch,
     )
@@ -761,9 +819,11 @@ if __name__ == "__main__":
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=args.num_workers,
         collate_fn=collate_refine,
         pin_memory=cfg.PIN_MEMORY,
+        pin_memory_device=device if cfg.PIN_MEMORY else "",
         drop_last=False,
         persistent_workers=persistent,
         prefetch_factor=prefetch,
@@ -775,17 +835,24 @@ if __name__ == "__main__":
         dim=args.dim,
         feature_dim=args.feature_dim,
         n_pitches=args.label_pitch_dim,
+        n_mels=n_mels,
+        label_pitch_dim=args.label_pitch_dim,
     ).to(device)
+
+    # Wrap with DDP when distributed
+    if is_dist():
+        model = DDP(model, device_ids=[local_rank])
 
     # Optional torch.compile (PyTorch 2.x)
     if args.compile and hasattr(torch, "compile"):
-        print("Compiling model with torch.compile ...")
+        if is_main_process():
+            print("Compiling model with torch.compile ...")
         model = torch.compile(model)
 
     # AMP scaler
     use_amp = (not args.no_amp) and device.startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda") if use_amp else None
-    if use_amp:
+    scaler = torch.amp.GradScaler(device) if use_amp else None
+    if use_amp and is_main_process():
         print("Using automatic mixed precision (AMP)")
 
     # Optimizer & scheduler
@@ -797,25 +864,33 @@ if __name__ == "__main__":
         scheduler_type=args.scheduler,
         epochs=args.epochs,
         steps_per_epoch=max(len(train_loader), 1),
+        max_lr=args.lr,
     )
 
-    # wandb
-    wandb.init(
-        project=args.wandb_project,
-        config={
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "lr": args.lr,
-            "blocks": args.blocks,
-            "dim": args.dim,
-            "feature_dim": args.feature_dim,
-            "scheduler": args.scheduler,
-            "threshold": args.threshold,
-            "seed": args.seed,
-            "beats_per_window": beats_per_window,
-            "weight_decay": cfg.WEIGHT_DECAY,
-        },
-    )
+    # wandb (rank 0 only)
+    if is_main_process():
+        wandb.init(
+            project=args.wandb_project,
+            config={
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "effective_batch_size": args.batch_size * world_size,
+                "lr": args.lr,
+                "blocks": args.blocks,
+                "dim": args.dim,
+                "feature_dim": args.feature_dim,
+                "scheduler": args.scheduler,
+                "threshold": args.threshold,
+                "seed": args.seed,
+                "beats_per_window": beats_per_window,
+                "weight_decay": cfg.WEIGHT_DECAY,
+                "world_size": world_size,
+            },
+        )
+
+    if is_main_process():
+        param_count = sum(p.numel() for p in model.parameters())
+        print(f"Model parameters: {param_count:,}")
 
     # Train
     run(
@@ -832,6 +907,9 @@ if __name__ == "__main__":
         scaler=scaler,
         grad_accum_steps=args.grad_accum_steps,
         metric_interval=args.metric_interval,
+        train_sampler=train_sampler,
     )
 
-    wandb.finish()
+    if is_main_process():
+        wandb.finish()
+    cleanup_distributed()
