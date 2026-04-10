@@ -24,7 +24,19 @@ from pretty_midi import PrettyMIDI
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from . import config as cfg
+import importlib.util as _ilu
+import types as _types
+
+def _load_config():
+    _spec = _ilu.spec_from_file_location(
+        "experiment_config",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py"),
+    )
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    return _mod
+
+cfg = _load_config()
 from models.fine import FineAMT, collate_refine
 from dataset.refine_dataset import RefineDataset
 from components.schedulers import make_optimizer, make_scheduler
