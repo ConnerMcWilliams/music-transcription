@@ -27,17 +27,17 @@ torchrun --nproc_per_node=$NGPUS \
     -d_midi      $MIDI_DIR \
     -d_cache     $NORM_DIR \
     --epochs        20 \
-    --batch_size    32 \
+    --batch_size    16 \
     --lr            3e-4 \
     --blocks        8 \
-    --dim           512 \
+    --dim           216 \
     --feature_dim   512 \
     --scheduler     onecycle \
     --threshold     0.5 \
     --wandb_project fine-amt \
     --checkpoint_dir $CHECKPOINT_DIR \
     --metadata_workers 8 \
-    --num_workers   4 \
+    --num_workers   2 \
     --prefetch_factor 2 \
     --grad_accum_steps 1 \
     --metric_interval 8 \
