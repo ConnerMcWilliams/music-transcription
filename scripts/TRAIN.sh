@@ -38,7 +38,7 @@ torchrun --nproc_per_node=$NGPUS \
     --checkpoint_dir $CHECKPOINT_DIR \
     --metadata_workers 8 \
     --num_workers   4 \
-    --prefetch_factor 4 \
+    --prefetch_factor 2 \
     --grad_accum_steps 1 \
     --metric_interval 8 \
     --seed          0
