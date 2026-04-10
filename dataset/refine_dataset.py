@@ -263,7 +263,12 @@ class RefineDataset(Dataset):
     @staticmethod
     def _to_tensor(v) -> torch.Tensor:
         if isinstance(v, (tuple, list)):
-            v = v[0]
+            # conv_wav2fe saves (tensor, hop_length) tuples — unwrap.
+            # note2label saves nested Python lists — convert directly.
+            if len(v) > 0 and isinstance(v[0], (torch.Tensor, np.ndarray)):
+                v = v[0]
+            else:
+                return torch.tensor(v, dtype=torch.float32)
         if isinstance(v, torch.Tensor):
             return v.float()
         if isinstance(v, np.ndarray):
