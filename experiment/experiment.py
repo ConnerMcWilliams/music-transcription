@@ -419,7 +419,7 @@ def build_metadata(
         with open(list_path, "r", encoding="utf-8") as fh:
             fnames = [line.rstrip("\n") for line in fh if line.strip()]
 
-        for fname in fnames:
+        for fname in tqdm(fnames, desc=f"  {split}", unit="file"):
             midi_path = os.path.join(d_midi, fname + ".mid")
             spec_path = os.path.join(d_feature, fname + ".pkl")
             label_path = os.path.join(d_label, fname + ".pkl")
