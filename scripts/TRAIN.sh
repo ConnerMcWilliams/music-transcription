@@ -36,5 +36,4 @@ python $CURRENT_DIR/../experiment/experiment.py \
     --prefetch_factor 4 \
     --grad_accum_steps 1 \
     --metric_interval 4 \
-    --compile \
     --seed          0
