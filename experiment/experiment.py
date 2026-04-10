@@ -74,7 +74,7 @@ def compute_fine_loss(fine_out: Dict[str, torch.Tensor], batch: Dict) -> torch.T
     with clamped predictions for numerical stability.
     """
     type_ids = batch["type_ids"]               # [B, max_len]
-    norm_labels = batch["normalized_labels"]    # {k: [B, L, 128]}
+    norm_labels = batch["normalized_labels"]    # {k: [B, L, P]}
     fine_mask = (type_ids == 1)                 # [B, max_len]
     B = type_ids.shape[0]
 
@@ -89,8 +89,8 @@ def compute_fine_loss(fine_out: Dict[str, torch.Tensor], batch: Dict) -> torch.T
             x_i = mask_i.sum()
             if x_i == 0:
                 continue
-            preds_list.append(fine_out[k][i, mask_i])        # [x_i, 128]
-            targets_list.append(norm_labels[k][i, :x_i])     # [x_i, 128]
+            preds_list.append(fine_out[k][i, mask_i])        # [x_i, P]
+            targets_list.append(norm_labels[k][i, :x_i])     # [x_i, P]
 
         if preds_list:
             p = torch.cat(preds_list).clamp(1e-7, 1.0 - 1e-7)
@@ -113,8 +113,8 @@ def _extract_notes(
     """Return ``[(pitch, start_frame, end_frame), ...]`` from onset/frame arrays.
 
     Args:
-        onsets: ``[T, 128]`` onset probabilities.
-        frames: ``[T, 128]`` frame probabilities.
+        onsets: ``[T, P]`` onset probabilities.
+        frames: ``[T, P]`` frame probabilities.
         threshold: detection threshold applied to both arrays.
     """
     notes: List[Tuple[int, int, int]] = []
@@ -183,7 +183,7 @@ class MetricAccumulator:
 
     def update(self, fine_out: Dict[str, torch.Tensor], batch: Dict) -> None:
         type_ids = batch["type_ids"]               # [B, max_len]
-        norm_labels = batch["normalized_labels"]    # {k: [B, L, 128]}
+        norm_labels = batch["normalized_labels"]    # {k: [B, L, P]}
         fine_mask = (type_ids == 1)
         B = type_ids.shape[0]
 
@@ -653,6 +653,8 @@ if __name__ == "__main__":
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--wandb_project", type=str, default="fine-amt")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--label_pitch_dim", type=int, default=88,
+                        help="Number of pitch classes in label tensors (default: 88 for MIDI A0-C8)")
     parser.add_argument("--metadata_workers", type=int, default=4,
                         help="Worker processes for parallel MIDI parsing")
     parser.add_argument("--seed", type=int, default=cfg.SEED)
@@ -691,10 +693,12 @@ if __name__ == "__main__":
     # Datasets & loaders
     n_mels = cfg.coarse_spectrogram["N_MELS"]
     train_ds = RefineDataset(
-        metadata["train"], feature_dim=args.feature_dim, n_mels=n_mels, dt=dt,
+        metadata["train"], feature_dim=args.feature_dim, n_mels=n_mels,
+        label_pitch_dim=args.label_pitch_dim, dt=dt,
     )
     val_ds = RefineDataset(
-        metadata["valid"], feature_dim=args.feature_dim, n_mels=n_mels, dt=dt,
+        metadata["valid"], feature_dim=args.feature_dim, n_mels=n_mels,
+        label_pitch_dim=args.label_pitch_dim, dt=dt,
     )
 
     persistent = cfg.PERSISTENT_WORKERS and cfg.NUM_WORKERS > 0
@@ -724,6 +728,7 @@ if __name__ == "__main__":
         blocks=args.blocks,
         dim=args.dim,
         feature_dim=args.feature_dim,
+        n_pitches=args.label_pitch_dim,
     ).to(device)
 
     # Optimizer & scheduler

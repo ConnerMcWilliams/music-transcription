@@ -26,8 +26,8 @@ def collate_refine(batch: List[Dict]) -> Dict:
         "sequence"          [B, max_len, feature_dim]
         "type_ids"          [B, max_len]  long  (-1 = padding)
         "lengths"           [B]           long  (true T_i + L per sample)
-        "normalized_labels" {k: [B, L, 128]}    (L is same for all samples)
-        "original_labels"   {k: [B, max_T, 128]}(T_i varies; zero-padded)
+        "normalized_labels" {k: [B, L, P]}      (L is same for all samples)
+        "original_labels"   {k: [B, max_T, P]}  (T_i varies; zero-padded)
     """
     sequences = [s["sequence"] for s in batch]   # list of [T_i+L, D]
     type_ids  = [s["type_ids"] for s in batch]   # list of [T_i+L]
@@ -40,26 +40,27 @@ def collate_refine(batch: List[Dict]) -> Dict:
     # normalized_labels: L is fixed across the dataset
     label_keys  = ("on", "off", "frame", "velocity")
     norm_labels = {
-        k: torch.stack([s["normalized_labels"][k] for s in batch])  # [B, L, 128]
+        k: torch.stack([s["normalized_labels"][k] for s in batch])  # [B, L, P]
         for k in label_keys
     }
 
     # original_labels: T varies — zero-pad to max T in this batch
     max_T = max(s["original_labels"]["frame"].shape[0] for s in batch)
+    n_pitches = batch[0]["original_labels"]["frame"].shape[-1]
     orig_labels: Dict[str, torch.Tensor] = {}
     for k in label_keys:
-        padded = torch.zeros(len(batch), max_T, 128)
+        padded = torch.zeros(len(batch), max_T, n_pitches)
         for i, s in enumerate(batch):
             t = s["original_labels"][k]
             padded[i, : t.shape[0]] = t
-        orig_labels[k] = padded  # [B, max_T, 128]
+        orig_labels[k] = padded  # [B, max_T, P]
 
     return {
         "sequence":          seq_padded,   # [B, max_len, feature_dim]
         "type_ids":          type_padded,  # [B, max_len]
         "lengths":           lengths,      # [B]
-        "normalized_labels": norm_labels,  # {k: [B, L, 128]}
-        "original_labels":   orig_labels,  # {k: [B, max_T, 128]}
+        "normalized_labels": norm_labels,  # {k: [B, L, P]}
+        "original_labels":   orig_labels,  # {k: [B, max_T, P]}
     }
 
 

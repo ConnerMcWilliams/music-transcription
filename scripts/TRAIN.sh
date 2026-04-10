@@ -31,4 +31,5 @@ python $CURRENT_DIR/../experiment/experiment.py \
     --threshold     0.5 \
     --wandb_project fine-amt \
     --checkpoint_dir $CHECKPOINT_DIR \
+    --metadata_workers 4 \
     --seed          0

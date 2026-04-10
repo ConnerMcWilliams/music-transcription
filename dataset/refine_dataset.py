@@ -47,10 +47,10 @@ class RefineDataset(Dataset):
             order.  x = number of beat subdivisions within the spec window.
         "type_ids"          : Tensor [T + x]  long
             0 for spectrogram frames, 1 for beat-label steps.
-        "normalized_labels" : dict {"on","off","frame","velocity"} each [x, 128]
+        "normalized_labels" : dict {"on","off","frame","velocity"} each [x, P]
             Beat-synchronized labels for the beat-domain loss (filtered to
             subdivisions within the spectrogram window).
-        "original_labels"   : dict {"on","off","frame","velocity"} each [T, 128]
+        "original_labels"   : dict {"on","off","frame","velocity"} each [T, P]
             Time-domain labels aligned with the spectrogram window.
 
     Projections
@@ -152,8 +152,8 @@ class RefineDataset(Dataset):
         return {
             "sequence":          sequence,     # [T + x, feature_dim]
             "type_ids":          type_ids,     # [T + x]
-            "normalized_labels": norm_labels,  # {"on","off","frame","velocity"} [x, 128]
-            "original_labels":   orig_labels,  # {"on","off","frame","velocity"} [T, 128]
+            "normalized_labels": norm_labels,  # {"on","off","frame","velocity"} [x, P]
+            "original_labels":   orig_labels,  # {"on","off","frame","velocity"} [T, P]
         }
 
     # ------------------------------------------------------------------
