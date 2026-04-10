@@ -22,7 +22,7 @@ python $CURRENT_DIR/../experiment/experiment.py \
     -d_midi      $MIDI_DIR \
     -d_cache     $NORM_DIR \
     --epochs        20 \
-    --batch_size    4 \
+    --batch_size    16 \
     --lr            1e-4 \
     --blocks        4 \
     --dim           256 \
@@ -32,4 +32,9 @@ python $CURRENT_DIR/../experiment/experiment.py \
     --wandb_project fine-amt \
     --checkpoint_dir $CHECKPOINT_DIR \
     --metadata_workers 4 \
+    --num_workers   4 \
+    --prefetch_factor 4 \
+    --grad_accum_steps 1 \
+    --metric_interval 4 \
+    --compile \
     --seed          0

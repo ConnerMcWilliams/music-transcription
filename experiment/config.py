@@ -20,7 +20,7 @@ CACHE_PATH = os.path.join(PROJECT_ROOT, "dataset", "transformed_data")
 # ==========================
 # These control torch.utils.data.DataLoader
 BATCH_SIZE              = 4
-NUM_WORKERS             = 2              # set 0 in notebooks or on Windows
+NUM_WORKERS             = 4              # set 0 in notebooks or on Windows
 DROP_LAST_TRAIN         = True
 PIN_MEMORY              = True
 PIN_MEMORY_DEVICE       = DEVICE if DEVICE.startswith("cuda") else "cpu"

@@ -245,27 +245,45 @@ def train_one_epoch(
     scheduler,
     device: str,
     accumulator: MetricAccumulator,
+    *,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    grad_accum_steps: int = 1,
+    metric_interval: int = 4,
 ) -> float:
     model.train()
     total_loss = 0.0
     n_batches = 0
 
-    for batch in tqdm(loader, desc="  Train", leave=False):
+    optimizer.zero_grad(set_to_none=True)
+
+    for step, batch in enumerate(tqdm(loader, desc="  Train", leave=False)):
         batch = to_device(batch, device)
-        _, fine_out = model(batch)
-        loss = compute_fine_loss(fine_out, batch)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
+        with torch.autocast(device_type="cuda", enabled=scaler is not None):
+            _, fine_out = model(batch)
+            loss = compute_fine_loss(fine_out, batch) / grad_accum_steps
 
-        total_loss += loss.item()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        if (step + 1) % grad_accum_steps == 0 or (step + 1) == len(loader):
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if scheduler is not None:
+                scheduler.step()
+
+        total_loss += loss.item() * grad_accum_steps
         n_batches += 1
 
-        with torch.no_grad():
-            accumulator.update(fine_out, batch)
+        if (step + 1) % metric_interval == 0:
+            with torch.no_grad():
+                accumulator.update(fine_out, batch)
 
     return total_loss / max(n_batches, 1)
 
@@ -276,6 +294,8 @@ def validate_one_epoch(
     loader: DataLoader,
     device: str,
     accumulator: MetricAccumulator,
+    *,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> float:
     model.eval()
     total_loss = 0.0
@@ -283,8 +303,9 @@ def validate_one_epoch(
 
     for batch in tqdm(loader, desc="  Val  ", leave=False):
         batch = to_device(batch, device)
-        _, fine_out = model(batch)
-        loss = compute_fine_loss(fine_out, batch)
+        with torch.autocast(device_type="cuda", enabled=scaler is not None):
+            _, fine_out = model(batch)
+            loss = compute_fine_loss(fine_out, batch)
         total_loss += loss.item()
         n_batches += 1
         accumulator.update(fine_out, batch)
@@ -560,6 +581,9 @@ def run(
     checkpoint_dir: str,
     threshold: float,
     onset_tolerance: int = 3,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    grad_accum_steps: int = 1,
+    metric_interval: int = 4,
 ) -> None:
     os.makedirs(checkpoint_dir, exist_ok=True)
     best_note_f1 = -1.0
@@ -573,12 +597,15 @@ def run(
         train_acc = MetricAccumulator(threshold, onset_tolerance)
         train_loss = train_one_epoch(
             model, train_loader, optimizer, scheduler, device, train_acc,
+            scaler=scaler, grad_accum_steps=grad_accum_steps,
+            metric_interval=metric_interval,
         )
         train_metrics = train_acc.compute()
 
         # --- Validate ---
         val_acc = MetricAccumulator(threshold, onset_tolerance)
-        val_loss = validate_one_epoch(model, val_loader, device, val_acc)
+        val_loss = validate_one_epoch(model, val_loader, device, val_acc,
+                                      scaler=scaler)
         val_metrics = val_acc.compute()
 
         lr = optimizer.param_groups[0]["lr"]
@@ -657,6 +684,18 @@ if __name__ == "__main__":
                         help="Number of pitch classes in label tensors (default: 88 for MIDI A0-C8)")
     parser.add_argument("--metadata_workers", type=int, default=4,
                         help="Worker processes for parallel MIDI parsing")
+    parser.add_argument("--num_workers", type=int, default=cfg.NUM_WORKERS,
+                        help="DataLoader worker processes")
+    parser.add_argument("--prefetch_factor", type=int, default=4,
+                        help="Batches prefetched per DataLoader worker")
+    parser.add_argument("--grad_accum_steps", type=int, default=1,
+                        help="Gradient accumulation steps (effective batch = batch_size * this)")
+    parser.add_argument("--metric_interval", type=int, default=4,
+                        help="Compute training metrics every N batches (saves GPU sync)")
+    parser.add_argument("--no_amp", action="store_true",
+                        help="Disable automatic mixed precision")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile() on the model (PyTorch 2.x)")
     parser.add_argument("--seed", type=int, default=cfg.SEED)
     args = parser.parse_args()
 
@@ -668,6 +707,9 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(args.seed)
 
     device = cfg.DEVICE
+
+    # Performance: enable cudnn autotuner
+    torch.backends.cudnn.benchmark = True
 
     # Derived constants from config
     dt = cfg.coarse_spectrogram["HOP_LENGTH"] / cfg.coarse_spectrogram["SAMPLE_RATE"]
@@ -701,26 +743,29 @@ if __name__ == "__main__":
         label_pitch_dim=args.label_pitch_dim, dt=dt,
     )
 
-    persistent = cfg.PERSISTENT_WORKERS and cfg.NUM_WORKERS > 0
+    persistent = cfg.PERSISTENT_WORKERS and args.num_workers > 0
+    prefetch = args.prefetch_factor if args.num_workers > 0 else None
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=cfg.NUM_WORKERS,
+        num_workers=args.num_workers,
         collate_fn=collate_refine,
         pin_memory=cfg.PIN_MEMORY,
         drop_last=cfg.DROP_LAST_TRAIN,
         persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=cfg.NUM_WORKERS,
+        num_workers=args.num_workers,
         collate_fn=collate_refine,
         pin_memory=cfg.PIN_MEMORY,
         drop_last=False,
         persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
 
     # Model
@@ -730,6 +775,17 @@ if __name__ == "__main__":
         feature_dim=args.feature_dim,
         n_pitches=args.label_pitch_dim,
     ).to(device)
+
+    # Optional torch.compile (PyTorch 2.x)
+    if args.compile and hasattr(torch, "compile"):
+        print("Compiling model with torch.compile ...")
+        model = torch.compile(model)
+
+    # AMP scaler
+    use_amp = (not args.no_amp) and device.startswith("cuda")
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if use_amp:
+        print("Using automatic mixed precision (AMP)")
 
     # Optimizer & scheduler
     optimizer = make_optimizer(
@@ -772,6 +828,9 @@ if __name__ == "__main__":
         device=device,
         checkpoint_dir=args.checkpoint_dir,
         threshold=args.threshold,
+        scaler=scaler,
+        grad_accum_steps=args.grad_accum_steps,
+        metric_interval=args.metric_interval,
     )
 
     wandb.finish()

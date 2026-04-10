@@ -1,11 +1,36 @@
 import os
 import pickle
+from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
+
+
+def _load_pickle(path: str):
+    """Load a pickle file from disk (cacheable helper)."""
+    with open(path, "rb") as fh:
+        return pickle.load(fh)
+
+
+class _PickleCache:
+    """Thread-safe LRU cache for per-piece pickle files.
+
+    Many windows share the same orig_spec_path / orig_labels_path, so caching
+    avoids redundant disk reads.  *maxsize* controls memory usage — set to 0
+    to disable caching entirely.
+    """
+
+    def __init__(self, maxsize: int = 128) -> None:
+        if maxsize > 0:
+            self._get = lru_cache(maxsize=maxsize)(_load_pickle)
+        else:
+            self._get = _load_pickle  # type: ignore[assignment]
+
+    def __call__(self, path: str):
+        return self._get(path)
 
 
 class RefineDataset(Dataset):
@@ -81,12 +106,14 @@ class RefineDataset(Dataset):
         n_mels: int = 128,
         label_pitch_dim: int = 128,
         dt: float = 0.02,
+        cache_size: int = 128,
     ) -> None:
         super().__init__()
         self.metadata          = list(metadata)
         self.feature_dim       = feature_dim
         self.dt                = dt              # seconds per spec frame (hop_length / sample_rate)
         self.label_feature_dim = 4 * label_pitch_dim   # on + off + frame + velocity
+        self._cache            = _PickleCache(maxsize=cache_size)
 
         # Linear projection: n_mels → feature_dim  (None when dims already match)
         self.spec_proj: Optional[nn.Linear] = (
@@ -175,8 +202,7 @@ class RefineDataset(Dataset):
         e = int(sample["end_frame"])
 
         # --- Spectrogram ---
-        with open(sample["orig_spec_path"], "rb") as fh:
-            spec_raw = pickle.load(fh)
+        spec_raw = self._cache(sample["orig_spec_path"])
 
         spec = self._to_tensor(spec_raw)
         if spec.dim() == 3:
@@ -184,8 +210,7 @@ class RefineDataset(Dataset):
         spec_window = spec[:, s:e].T  # [T, n_mels]
 
         # --- Labels ---
-        with open(sample["orig_labels_path"], "rb") as fh:
-            raw_labels = pickle.load(fh)
+        raw_labels = self._cache(sample["orig_labels_path"])
 
         orig_labels = {
             out_key: self._to_tensor(raw_labels[raw_key])[s:e]
