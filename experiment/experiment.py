@@ -86,8 +86,6 @@ def to_device(batch: Dict, device: str) -> Dict:
     """Recursively move tensors in a collated batch dict to *device*."""
     out: Dict = {}
     for k, v in batch.items():
-        if k == "original_labels":
-            continue  # never used on GPU; skip to save VRAM
         if isinstance(v, torch.Tensor):
             out[k] = v.to(device, non_blocking=True)
         elif isinstance(v, dict):
@@ -294,7 +292,7 @@ def train_one_epoch(
         batch = to_device(batch, device)
 
         with torch.autocast(device_type="cuda", enabled=scaler is not None):
-            _, fine_out = model(batch)
+            fine_out = model(batch)
             loss = compute_fine_loss(fine_out, batch) / grad_accum_steps
 
         if scaler is not None:
@@ -338,7 +336,7 @@ def validate_one_epoch(
     for batch in tqdm(loader, desc="  Val  ", leave=False):
         batch = to_device(batch, device)
         with torch.autocast(device_type="cuda", enabled=scaler is not None):
-            _, fine_out = model(batch)
+            fine_out = model(batch)
             loss = compute_fine_loss(fine_out, batch)
         total_loss += loss.item()
         n_batches += 1
@@ -410,7 +408,7 @@ def log_visualizations(
     batch = collate_refine([sample])
     batch = to_device(batch, device)
     with torch.no_grad():
-        _, fine_out = model(batch)
+        fine_out = model(batch)
 
     type_ids = batch["type_ids"][0]                  # [max_len]
     mask = (type_ids == 1)
