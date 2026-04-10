@@ -24,7 +24,7 @@ from pretty_midi import PrettyMIDI
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from experiment import config as cfg
+from . import config as cfg
 from models.fine import FineAMT, collate_refine
 from dataset.refine_dataset import RefineDataset
 from components.schedulers import make_optimizer, make_scheduler
