@@ -455,9 +455,9 @@ def transform_spec_and_pickle(
     # Execute
     if use_parallel and len(worker_args_list) > 1:
         if num_workers is None:
-            num_workers = max(1, (os.cpu_count() or 2) - 1)
+            num_workers = min(4, max(1, (os.cpu_count() or 2) - 1))
         # Limit in-flight futures to avoid OOM from too many loaded spectrograms
-        max_pending = num_workers * 2
+        max_pending = num_workers + 1
         print(f"Parallel caching: {num_workers} workers, {unprocessed} windows remaining")
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
