@@ -37,10 +37,15 @@ def collate_refine(batch: List[Dict]) -> Dict:
     seq_padded  = pad_sequence(sequences, batch_first=True, padding_value=0.0)  # [B, max_len, D]
     type_padded = pad_sequence(type_ids,  batch_first=True, padding_value=-1)   # [B, max_len]
 
-    # normalized_labels: L is fixed across the dataset
+    # normalized_labels: x (number of beat tokens) can vary per sample due to
+    # tempo-dependent filtering, so pad to the longest x in the batch.
     label_keys  = ("on", "off", "frame", "velocity")
     norm_labels = {
-        k: torch.stack([s["normalized_labels"][k] for s in batch])  # [B, L, P]
+        k: pad_sequence(
+            [s["normalized_labels"][k] for s in batch],
+            batch_first=True,
+            padding_value=0.0,
+        )  # [B, max_x, P]
         for k in label_keys
     }
 
@@ -160,7 +165,7 @@ class FineAMT(nn.Module):
     def forward(
         self,
         batch: Dict,
-    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    ) -> Dict[str, torch.Tensor]:
         """
         Args:
             batch: dict from collate_refine
@@ -168,13 +173,10 @@ class FineAMT(nn.Module):
                 "type_ids"  [B, max_len]  (-1 for padding positions)
 
         Returns:
-            coarse_out  dict {k: [B, max_len, n_pitches]}
-                Non-zero only at positions where type_id == 0 (spec tokens).
             fine_out    dict {k: [B, max_len, n_pitches]}
                 Non-zero only at positions where type_id == 1 (beat tokens).
 
         Loss computation:
-            coarse_loss uses (type_ids == 0) mask against original_labels
             fine_loss   uses (type_ids == 1) mask against normalized_labels
         """
         x        = batch["sequence"]   # [B, max_len, max_dim]  (zero-padded raw features)

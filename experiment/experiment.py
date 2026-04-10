@@ -6,6 +6,7 @@ import math
 import pickle
 import random
 import argparse
+import traceback
 from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
@@ -553,13 +554,15 @@ def build_metadata(
                 norm_labels_path = os.path.join(cache_dir, f"labels_{window_idx}.pkl")
 
                 if not os.path.exists(extra_path):
+                    print(f"  [SKIP] {fname} window {window_idx}: missing {extra_path}")
                     window_idx += 1
                     continue
 
                 try:
                     with open(extra_path, "rb") as fh:
                         extra = pickle.load(fh)
-                except (EOFError, pickle.UnpicklingError):
+                except (EOFError, pickle.UnpicklingError) as exc:
+                    print(f"  [SKIP] {fname} window {window_idx}: corrupt extra pickle: {exc}")
                     window_idx += 1
                     continue
 
@@ -700,7 +703,7 @@ def run(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Train FineAMT")
     parser.add_argument("-d_list", required=True,
                         help="Dir with train/test/valid .list files")
@@ -791,6 +794,18 @@ if __name__ == "__main__":
         metadata["valid"], feature_dim=args.feature_dim, n_mels=n_mels,
         label_pitch_dim=args.label_pitch_dim, dt=dt,
     )
+
+    if len(train_ds) == 0:
+        raise RuntimeError(
+            f"Training dataset is empty! Check that cache files exist in the "
+            f"directory passed to -d_cache ({args.d_cache}) and that .list files "
+            f"in -d_list ({args.d_list}) reference valid filenames."
+        )
+    if len(val_ds) == 0:
+        raise RuntimeError(
+            f"Validation dataset is empty! Check cache/list dirs: "
+            f"-d_cache={args.d_cache}, -d_list={args.d_list}"
+        )
 
     persistent = cfg.PERSISTENT_WORKERS and args.num_workers > 0
     prefetch = args.prefetch_factor if args.num_workers > 0 else None
@@ -913,3 +928,11 @@ if __name__ == "__main__":
     if is_main_process():
         wandb.finish()
     cleanup_distributed()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)

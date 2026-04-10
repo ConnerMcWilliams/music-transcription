@@ -144,7 +144,7 @@ class RefineDataset(Dataset):
         t_start = start_frame * self.dt
         t_end   = end_frame * self.dt
 
-        in_range = (ts_target >= t_start) & (ts_target < t_end)  # [L]
+        in_range = (ts_target >= t_start) & (ts_target <= t_end)  # [L]
         ts_target    = ts_target[in_range]                        # [x]
         label_tokens = label_tokens[in_range]                     # [x, 4*P]
         norm_labels  = {k: v[in_range] for k, v in norm_labels.items()}  # [x, P]
