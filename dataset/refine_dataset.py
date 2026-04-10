@@ -262,6 +262,8 @@ class RefineDataset(Dataset):
 
     @staticmethod
     def _to_tensor(v) -> torch.Tensor:
+        if isinstance(v, (tuple, list)):
+            v = v[0]
         if isinstance(v, torch.Tensor):
             return v.float()
         if isinstance(v, np.ndarray):
