@@ -95,7 +95,8 @@ def compute_fine_loss(fine_out: Dict[str, torch.Tensor], batch: Dict) -> torch.T
         if preds_list:
             p = torch.cat(preds_list).float().clamp(1e-7, 1.0 - 1e-7)
             t = torch.cat(targets_list).float()
-            total_loss = total_loss + F.binary_cross_entropy(p, t, reduction="sum")
+            with torch.autocast(device_type="cuda", enabled=False):
+                total_loss = total_loss + F.binary_cross_entropy(p, t, reduction="sum")
             count += p.numel()
 
     return total_loss / max(count, 1)
