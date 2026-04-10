@@ -454,8 +454,12 @@ def build_metadata(
                     window_idx += 1
                     continue
 
-                with open(extra_path, "rb") as fh:
-                    extra = pickle.load(fh)
+                try:
+                    with open(extra_path, "rb") as fh:
+                        extra = pickle.load(fh)
+                except (EOFError, pickle.UnpicklingError):
+                    window_idx += 1
+                    continue
 
                 times = extra["times"]
                 max_time = extra["max_time"]
