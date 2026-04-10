@@ -86,6 +86,8 @@ def to_device(batch: Dict, device: str) -> Dict:
     """Recursively move tensors in a collated batch dict to *device*."""
     out: Dict = {}
     for k, v in batch.items():
+        if k == "original_labels":
+            continue  # never used on GPU; skip to save VRAM
         if isinstance(v, torch.Tensor):
             out[k] = v.to(device, non_blocking=True)
         elif isinstance(v, dict):
