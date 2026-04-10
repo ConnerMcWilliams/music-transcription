@@ -6,7 +6,8 @@ import math
 import pickle
 import random
 import argparse
-from typing import Dict, List, Tuple
+from concurrent.futures import ProcessPoolExecutor
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -388,6 +389,36 @@ def log_visualizations(
 
 
 # ---------------------------------------------------------------------------
+# Metadata builder helpers
+# ---------------------------------------------------------------------------
+
+def _parse_midi_file(
+    args: Tuple[str, str, str, str, int, int],
+) -> Tuple[str, str, str, Optional[List[int]]]:
+    """Parse one MIDI file and return its window start indices.
+
+    Designed to run in a worker process.  Returns
+    ``(fname, spec_path, label_path, starts_or_None)``.
+    """
+    fname, midi_path, spec_path, label_path, beats_per_window, hop_beats = args
+    try:
+        pm = PrettyMIDI(midi_path)
+    except Exception:
+        return fname, spec_path, label_path, None
+
+    beats, _ = get_beats_and_downbeats(pm)
+    K = max(0, len(beats) - 1)
+    if K < beats_per_window:
+        return fname, spec_path, label_path, None
+
+    starts = list(range(0, K - beats_per_window + 1, hop_beats))
+    last_start = K - beats_per_window
+    if not starts or starts[-1] != last_start:
+        starts.append(last_start)
+    return fname, spec_path, label_path, starts
+
+
+# ---------------------------------------------------------------------------
 # Metadata builder
 # ---------------------------------------------------------------------------
 
@@ -401,12 +432,16 @@ def build_metadata(
     beats_per_window: int,
     hop_beats: int,
     dt: float,
+    workers: int = 4,
 ) -> Dict[str, List[Dict]]:
     """Build per-window metadata dicts for :class:`RefineDataset`.
 
     Iterates train -> test -> valid ``.list`` files in the **same order** as
     ``cache_spec.py`` so that the global window index matches the cached
     ``labels_N / extra_N`` pickle numbering.
+
+    Phase 1 (parallel): MIDI parsing + beat computation for each file.
+    Phase 2 (sequential): window-index assignment + extra pickle loading.
     """
     result: Dict[str, List[Dict]] = {"train": [], "test": [], "valid": []}
     window_idx = 0
@@ -419,32 +454,44 @@ def build_metadata(
         with open(list_path, "r", encoding="utf-8") as fh:
             fnames = [line.rstrip("\n") for line in fh if line.strip()]
 
-        for fname in tqdm(fnames, desc=f"  {split}", unit="file"):
-            midi_path = os.path.join(d_midi, fname + ".mid")
-            spec_path = os.path.join(d_feature, fname + ".pkl")
-            label_path = os.path.join(d_label, fname + ".pkl")
+        # --- Phase 1: parallel MIDI parsing ---
+        parse_args = [
+            (
+                fname,
+                os.path.join(d_midi, fname + ".mid"),
+                os.path.join(d_feature, fname + ".pkl"),
+                os.path.join(d_label, fname + ".pkl"),
+                beats_per_window,
+                hop_beats,
+            )
+            for fname in fnames
+            if (
+                os.path.exists(os.path.join(d_midi, fname + ".mid"))
+                and os.path.exists(os.path.join(d_feature, fname + ".pkl"))
+                and os.path.exists(os.path.join(d_label, fname + ".pkl"))
+            )
+        ]
 
-            if not (
-                os.path.exists(midi_path)
-                and os.path.exists(spec_path)
-                and os.path.exists(label_path)
+        parsed: Dict[str, Tuple[str, str, Optional[List[int]]]] = {}
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for fname, spec_path, label_path, starts in tqdm(
+                pool.map(_parse_midi_file, parse_args),
+                total=len(parse_args),
+                desc=f"  {split} (parse)",
+                unit="file",
             ):
+                parsed[fname] = (spec_path, label_path, starts)
+
+        # --- Phase 2: sequential index assignment + pickle loading ---
+        for fname in tqdm(fnames, desc=f"  {split} (index)", unit="file"):
+            if fname not in parsed:
+                # file was missing on disk — skip without advancing window_idx
+                # (cache_spec.py also skips missing files)
                 continue
 
-            try:
-                pm = PrettyMIDI(midi_path)
-            except Exception:
+            spec_path, label_path, starts = parsed[fname]
+            if starts is None:
                 continue
-
-            beats, _ = get_beats_and_downbeats(pm)
-            K = max(0, len(beats) - 1)
-            if K < beats_per_window:
-                continue
-
-            starts = list(range(0, K - beats_per_window + 1, hop_beats))
-            last_start = K - beats_per_window
-            if not starts or starts[-1] != last_start:
-                starts.append(last_start)
 
             for _start_beat_idx in starts:
                 extra_path = os.path.join(cache_dir, f"extra_{window_idx}.pkl")
@@ -606,6 +653,8 @@ if __name__ == "__main__":
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--wandb_project", type=str, default="fine-amt")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--metadata_workers", type=int, default=4,
+                        help="Worker processes for parallel MIDI parsing")
     parser.add_argument("--seed", type=int, default=cfg.SEED)
     args = parser.parse_args()
 
@@ -634,6 +683,7 @@ if __name__ == "__main__":
         beats_per_window=beats_per_window,
         hop_beats=hop_beats,
         dt=dt,
+        workers=args.metadata_workers,
     )
     for sp in ("train", "test", "valid"):
         print(f"  {sp}: {len(metadata[sp])} windows")
