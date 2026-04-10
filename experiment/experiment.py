@@ -93,8 +93,8 @@ def compute_fine_loss(fine_out: Dict[str, torch.Tensor], batch: Dict) -> torch.T
             targets_list.append(norm_labels[k][i, :x_i])     # [x_i, P]
 
         if preds_list:
-            p = torch.cat(preds_list).clamp(1e-7, 1.0 - 1e-7)
-            t = torch.cat(targets_list)
+            p = torch.cat(preds_list).float().clamp(1e-7, 1.0 - 1e-7)
+            t = torch.cat(targets_list).float()
             total_loss = total_loss + F.binary_cross_entropy(p, t, reduction="sum")
             count += p.numel()
 
@@ -246,7 +246,7 @@ def train_one_epoch(
     device: str,
     accumulator: MetricAccumulator,
     *,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    scaler: Optional[torch.amp.GradScaler] = None,
     grad_accum_steps: int = 1,
     metric_interval: int = 4,
 ) -> float:
@@ -295,7 +295,7 @@ def validate_one_epoch(
     device: str,
     accumulator: MetricAccumulator,
     *,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    scaler: Optional[torch.amp.GradScaler] = None,
 ) -> float:
     model.eval()
     total_loss = 0.0
@@ -581,7 +581,7 @@ def run(
     checkpoint_dir: str,
     threshold: float,
     onset_tolerance: int = 3,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    scaler: Optional[torch.amp.GradScaler] = None,
     grad_accum_steps: int = 1,
     metric_interval: int = 4,
 ) -> None:
@@ -783,7 +783,7 @@ if __name__ == "__main__":
 
     # AMP scaler
     use_amp = (not args.no_amp) and device.startswith("cuda")
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
     if use_amp:
         print("Using automatic mixed precision (AMP)")
 
