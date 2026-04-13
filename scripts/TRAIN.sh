@@ -21,24 +21,4 @@ NGPUS=${NGPUS:-1}
 
 torchrun --nproc_per_node=$NGPUS \
     $CURRENT_DIR/../experiment/experiment.py \
-    -d_list      $LIST_DIR \
-    -d_feature   $FEATURE_DIR \
-    -d_label     $LABEL_DIR \
-    -d_midi      $MIDI_DIR \
-    -d_cache     $NORM_DIR \
-    --epochs        20 \
-    --batch_size    16 \
-    --lr            3e-4 \
-    --blocks        8 \
-    --dim           216 \
-    --feature_dim   512 \
-    --scheduler     onecycle \
-    --threshold     0.5 \
-    --wandb_project fine-amt \
-    --checkpoint_dir $CHECKPOINT_DIR \
-    --metadata_workers 8 \
-    --num_workers   2 \
-    --prefetch_factor 2 \
-    --grad_accum_steps 1 \
-    --metric_interval 8 \
     --seed          0

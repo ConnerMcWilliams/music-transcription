@@ -6,12 +6,12 @@ DATASET_SCRIPTS=$CURRENT_DIR/../dataset
 CORPUS_DIR=$CURRENT_DIR/../dataset/corpus
 MAESTRO_DIR=$CORPUS_DIR/MAESTRO-V3
 LIST_DIR=$MAESTRO_DIR/list
-MIDI_DIR=$MAESTRO_DIR/midi
+MIDI_DIR=$MAESTRO_DIR/midi/midi
 WAV_DIR=$MAESTRO_DIR/wav
-FEATURE_DIR=$MAESTRO_DIR/feature
+FEATURE_DIR=$MAESTRO_DIR/feature/spec
 NOTE_DIR=$MAESTRO_DIR/note
 LABEL_DIR=$MAESTRO_DIR/label
-NORM_DIR=$MAESTRO_DIR/norm
+MIDI_NORM_DIR=$MAESTRO_DIR/midi/norm
 REFERENCE_DIR=$MAESTRO_DIR/reference
 DATASET_DIR=$MAESTRO_DIR/dataset
 CONFIG_FILE=$DATASET_SCRIPTS/config.json
@@ -74,14 +74,14 @@ python $DATASET_SCRIPTS/note2label.py -d_list $LIST_DIR \
     -d_label $LABEL_DIR \
     -config $CONFIG_FILE
 
-# 7. beat-normalize cached spectrograms and labels
-mkdir -p $NORM_DIR
+# 7. cache variable-length beat-normalized MIDI
+mkdir -p $MIDI_NORM_DIR
 python $DATASET_SCRIPTS/cache_spec.py \
     -d_list $LIST_DIR \
     -d_feature $FEATURE_DIR \
-    -d_label $LABEL_DIR \
     -d_midi $MIDI_DIR \
-    -d_out $NORM_DIR
+    -d_out_midi $MIDI_NORM_DIR \
+    -d_config $CONFIG_FILE
 
 # 8. convert txt to reference for evaluation
 mkdir -p $REFERENCE_DIR

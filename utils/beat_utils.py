@@ -93,5 +93,41 @@ def build_subdivision_times(beats_target_loco, S, start_beat_idx, num_beats):
         out.extend(step_times)
     return torch.tensor(out, dtype=torch.float32), max_value  # [num_beats*S]
 
+def build_subdivision_times_for_time_range(beats, S, t_start, t_end):
+    """
+    Return beat-subdivision times for all complete beat intervals whose
+    start beat falls within [t_start, t_end).
+
+    Args:
+        beats:    numpy array of beat times (seconds), shape (K,)
+        S:        subdivisions per beat
+        t_start:  window start time (seconds)
+        t_end:    window end time   (seconds)
+
+    Returns:
+        ts_target:  torch.Tensor [L] float32, or None if no beats in range
+        max_value:  float (time of beat following the last included interval) or None
+        num_beats:  int, number of complete beat intervals found
+    """
+    # Find the first beat index >= t_start
+    first = int(np.searchsorted(beats, t_start, side="left"))
+    # Find the last beat index whose start < t_end (we need beats[i+1] to exist)
+    last = int(np.searchsorted(beats, t_end, side="left"))  # first beat >= t_end
+
+    # We need at least two beats (one complete interval) within range,
+    # and beats[first+1] must exist to form a segment.
+    # last is the first beat >= t_end, so valid beat-interval starts are [first, last-1)
+    # but we also need beats[last-1+1] = beats[last] to exist.
+    # Number of complete beat intervals: beats[first] .. beats[last-1] as starts,
+    # with beats[first+1] .. beats[last] as ends.
+    num_beats = last - first  # number of intervals with start in [t_start, t_end)
+    if num_beats <= 0 or last >= len(beats):
+        return None, None, 0
+
+    # Delegate to existing function
+    ts_target, max_value = build_subdivision_times(beats, S, first, num_beats)
+    return ts_target, max_value, num_beats
+
+
 if __name__ == "__main__" :
     pm = PrettyMIDI('../test.midi')

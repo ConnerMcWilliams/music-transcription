@@ -5,56 +5,46 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 
+class MixedTokenEmbedder(nn.Module):
+    def __init__(self, d1, d2, d_model, max_len=4096):
+        super().__init__()
+        self.proj1 = nn.Sequential(
+            nn.Linear(d1, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.proj2 = nn.Sequential(
+            nn.Linear(d2, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
 
-# ---------------------------------------------------------------------------
-# Collate function for DataLoader
-# ---------------------------------------------------------------------------
+        self.type_embed = nn.Embedding(2, d_model)
+        self.pos_embed = nn.Embedding(max_len, d_model)
+        self.norm = nn.LayerNorm(d_model)
 
-def collate_refine(batch: List[Dict]) -> Dict:
-    """
-    Collate variable-length samples from RefineDataset into a padded batch.
+    def forward(self, x, token_type_ids):
+        """
+        x: [B, L, max_dim]  zero-padded raw features
+        token_type_ids: [B, L] with values 0 or 1 (use -1 for padding)
+        """
+        B, L = token_type_ids.shape
+        pos_ids = torch.arange(L, device=token_type_ids.device).unsqueeze(0).expand(B, L)
 
-    T (spectrogram frames) varies per sample because beat-window duration
-    depends on tempo.  L (beat-label steps) is fixed = beats_per_window * S.
-    Total sequence length T+L therefore varies; sequences are right-padded
-    to the longest in the batch.  Padding positions receive type_id = -1.
+        out = torch.zeros(B, L, self.type_embed.embedding_dim, device=x.device, dtype=x.dtype)
 
-    Args:
-        batch: list of dicts from RefineDataset.__getitem__
+        mask1 = token_type_ids == 0
+        mask2 = token_type_ids == 1
 
-    Returns dict with:
-        "sequence"          [B, max_len, feature_dim]
-        "type_ids"          [B, max_len]  long  (-1 = padding)
-        "lengths"           [B]           long  (true T_i + L per sample)
-        "normalized_labels" {k: [B, L, P]}      (L is same for all samples)
-        "original_labels"   {k: [B, max_T, P]}  (T_i varies; zero-padded)
-    """
-    sequences = [s["sequence"] for s in batch]   # list of [T_i+L, D]
-    type_ids  = [s["type_ids"] for s in batch]   # list of [T_i+L]
+        if mask1.any():
+            out[mask1] = self.proj1(x[mask1])
 
-    lengths = torch.tensor([s.shape[0] for s in sequences], dtype=torch.long)
+        if mask2.any():
+            out[mask2] = self.proj2(x[mask2])
 
-    seq_padded  = pad_sequence(sequences, batch_first=True, padding_value=0.0)  # [B, max_len, D]
-    type_padded = pad_sequence(type_ids,  batch_first=True, padding_value=-1)   # [B, max_len]
-
-    # normalized_labels: x (number of beat tokens) can vary per sample due to
-    # tempo-dependent filtering, so pad to the longest x in the batch.
-    label_keys  = ("on", "off", "frame", "velocity")
-    norm_labels = {
-        k: pad_sequence(
-            [s["normalized_labels"][k] for s in batch],
-            batch_first=True,
-            padding_value=0.0,
-        )  # [B, max_x, P]
-        for k in label_keys
-    }
-
-    return {
-        "sequence":          seq_padded,   # [B, max_len, feature_dim]
-        "type_ids":          type_padded,  # [B, max_len]
-        "lengths":           lengths,      # [B]
-        "normalized_labels": norm_labels,  # {k: [B, L, P]}
-    }
+        out = out + self.type_embed(token_type_ids.clamp(min=0)) + self.pos_embed(pos_ids)
+        out = self.norm(out)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -69,23 +59,20 @@ class OutputHead(nn.Module):
         "on"       onset probability        (sigmoid)
         "off"      offset probability       (sigmoid)
         "frame"    active-note indicator    (sigmoid)
-        "velocity" MIDI velocity 0-127      (raw linear — scale/clip in loss)
     """
 
     def __init__(self, dim: int, n_pitches: int = 128) -> None:
         super().__init__()
-        self.on_head       = nn.Linear(dim, n_pitches)
-        self.off_head      = nn.Linear(dim, n_pitches)
-        self.frame_head    = nn.Linear(dim, n_pitches)
-        self.velocity_head = nn.Linear(dim, n_pitches)
+        self.on_head    = nn.Linear(dim, n_pitches)
+        self.off_head   = nn.Linear(dim, n_pitches)
+        self.frame_head = nn.Linear(dim, n_pitches)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """x: [..., dim]  →  dict of [..., n_pitches]"""
         return {
-            "on":       torch.sigmoid(self.on_head(x)),
-            "off":      torch.sigmoid(self.off_head(x)),
-            "frame":    torch.sigmoid(self.frame_head(x)),
-            "velocity": self.velocity_head(x),
+            "on":    torch.sigmoid(self.on_head(x)),
+            "off":   torch.sigmoid(self.off_head(x)),
+            "frame": torch.sigmoid(self.frame_head(x)),
         }
 
 
@@ -98,54 +85,37 @@ class FineAMT(nn.Module):
     Mamba2-based AMT model that processes RefineDataset sequences.
 
     Input sequence layout (per sample):
-        positions 0 … T-1   type_id=0  original-time spectrogram tokens
-        positions T … T+L-1 type_id=1  beat-normalised label tokens
-    T varies per sample (tempo-dependent); L is fixed.
+        positions with type_id=0  →  original-time spectrogram tokens
+        positions with type_id=1  →  beat-normalised MIDI tokens
+    interleaved chronologically.
 
-    Two independent output heads decode the same Mamba output:
-        coarse_head  →  supervised on original_labels  (type_id == 0)
-        fine_head    →  supervised on normalized_labels (type_id == 1)
+    MixedTokenEmbedder projects both token types to the same d_model,
+    adding type and positional embeddings.
 
-    Both heads run over all positions; outputs at irrelevant / padding
-    positions are zeroed so the loss function can sum without masking.
+    Output head decodes beat-synchronous positions (type_id == 1) into
+    on/off/frame predictions.
     """
 
     def __init__(
         self,
         blocks: int,
         dim: int,
-        feature_dim: int = 512,
+        n_mels: int = 128,
+        label_pitch_dim: int = 128,
         d_state: int = 64,
         d_conv: int = 4,
         expand: int = 2,
         n_pitches: int = 128,
-        n_mels: int = 128,
-        label_pitch_dim: int = 88,
+        max_len: int = 4096,
     ) -> None:
         super().__init__()
 
-        self.n_mels = n_mels
-        self.label_feature_dim = 4 * label_pitch_dim
-
-        # Trainable projections from raw features → feature_dim (run on GPU)
-        self.spec_proj = (
-            nn.Linear(n_mels, feature_dim, bias=False)
-            if n_mels != feature_dim else nn.Identity()
+        self.embedder = MixedTokenEmbedder(
+            d1=n_mels,
+            d2=3 * label_pitch_dim,   # on + off + frame
+            d_model=dim,
+            max_len=max_len,
         )
-        self.label_proj = (
-            nn.Linear(self.label_feature_dim, feature_dim, bias=False)
-            if self.label_feature_dim != feature_dim else nn.Identity()
-        )
-
-        # Project dataset feature_dim → model dim (identity when equal)
-        self.input_proj: nn.Module = (
-            nn.Linear(feature_dim, dim, bias=False)
-            if feature_dim != dim else nn.Identity()
-        )
-
-        # Learned type embeddings: index 0 = spec token, index 1 = beat token
-        # Padding (type_id = -1) is clamped to 0 then zeroed by padding_mask.
-        self.type_embedding = nn.Embedding(2, dim)
 
         self.mamba_blocks = nn.ModuleList([
             Mamba2(
@@ -158,9 +128,7 @@ class FineAMT(nn.Module):
         ])
 
         self.norm = nn.LayerNorm(dim)
-
-        self.coarse_head = OutputHead(dim, n_pitches)  # original time grid
-        self.fine_head   = OutputHead(dim, n_pitches)  # beat-synchronous grid
+        self.fine_head = OutputHead(dim, n_pitches)
 
     def forward(
         self,
@@ -169,44 +137,29 @@ class FineAMT(nn.Module):
         """
         Args:
             batch: dict from collate_refine
-                "sequence"  [B, max_len, feature_dim]
+                "sequence"  [B, max_len, max_dim]
                 "type_ids"  [B, max_len]  (-1 for padding positions)
 
         Returns:
             fine_out    dict {k: [B, max_len, n_pitches]}
                 Non-zero only at positions where type_id == 1 (beat tokens).
-
-        Loss computation:
-            fine_loss   uses (type_ids == 1) mask against normalized_labels
         """
-        x        = batch["sequence"]   # [B, max_len, max_dim]  (zero-padded raw features)
+        x        = batch["sequence"]   # [B, max_len, max_dim]
         type_ids = batch["type_ids"]   # [B, max_len]
 
-        # Per-token-type projection from raw features → feature_dim
-        n_mels = self.n_mels
-        label_dim = self.label_feature_dim
-        spec_mask  = (type_ids == 0).unsqueeze(-1)  # [B, max_len, 1]
-        beat_mask  = (type_ids == 1).unsqueeze(-1)
-
-        spec_feat  = self.spec_proj(x[..., :n_mels])        # [B, max_len, feature_dim]
-        label_feat = self.label_proj(x[..., :label_dim])     # [B, max_len, feature_dim]
-        x = spec_feat * spec_mask.float() + label_feat * beat_mask.float()
-
-        # Input projection + type embedding
-        x = self.input_proj(x)                                     # [B, max_len, dim]
-        x = x + self.type_embedding(type_ids.clamp(min=0))        # [B, max_len, dim]
+        # Project both token types to d_model and add type/pos embeddings
+        x = self.embedder(x, type_ids)  # [B, max_len, dim]
 
         # Zero padding positions before Mamba so they don't pollute state
-        padding_mask = (type_ids == -1).unsqueeze(-1)              # [B, max_len, 1]
+        padding_mask = (type_ids == -1).unsqueeze(-1)  # [B, max_len, 1]
         x = x.masked_fill(padding_mask, 0.0)
 
         for block in self.mamba_blocks:
             x = block(x)
         x = self.norm(x)
 
-        # Only compute fine head (beat-synchronous); coarse head is unused
+        # Decode only beat-synchronous positions
         fine_out = self.fine_head(x)
-
         fine_mask = (type_ids == 1).unsqueeze(-1)
         fine_out = {k: v * fine_mask for k, v in fine_out.items()}
 
