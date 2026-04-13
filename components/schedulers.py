@@ -105,6 +105,7 @@ def make_scheduler(
             **kwargs
         )
     elif scheduler_type == "cosine":
+        kwargs.pop("max_lr", None)
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=total_steps,
