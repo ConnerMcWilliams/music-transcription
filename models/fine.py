@@ -8,6 +8,8 @@ from torch.nn.utils.rnn import pad_sequence
 class MixedTokenEmbedder(nn.Module):
     def __init__(self, d1, d2, d_model, max_len=4096):
         super().__init__()
+        self.d1 = d1
+        self.d2 = d2
         self.proj1 = nn.Sequential(
             nn.Linear(d1, d_model),
             nn.GELU(),
@@ -37,10 +39,10 @@ class MixedTokenEmbedder(nn.Module):
         mask2 = token_type_ids == 1
 
         if mask1.any():
-            out[mask1] = self.proj1(x[mask1])
+            out[mask1] = self.proj1(x[mask1][:, :self.d1])
 
         if mask2.any():
-            out[mask2] = self.proj2(x[mask2])
+            out[mask2] = self.proj2(x[mask2][:, :self.d2])
 
         out = out + self.type_embed(token_type_ids.clamp(min=0)) + self.pos_embed(pos_ids)
         out = self.norm(out)

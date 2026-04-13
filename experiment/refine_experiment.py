@@ -19,6 +19,7 @@ import os
 import pickle
 import random
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib
@@ -112,54 +113,65 @@ def build_metadata(
             midi_path, ts_target_path, orig_spec_path, start_frame, end_frame
     """
     split_meta: Dict[str, List[Dict]] = {"train": [], "test": [], "valid": []}
-    window_idx = 0
 
+    # ── Phase 1: collect valid (split, fname, spec_path) in iteration order ──
+    ordered_entries: List[tuple] = []
     for split in ("train", "test", "valid"):
         list_path = os.path.join(list_dir, f"{split}.list")
         if not os.path.exists(list_path):
             continue
-
         with open(list_path, "r", encoding="utf-8") as fh:
             fnames = [line.strip() for line in fh if line.strip()]
-
         for fname in fnames:
-            spec_path = os.path.join(feature_dir, fname + ".pkl")
-            midi_path_orig = os.path.join(midi_dir, fname + ".mid")
+            spec_path      = os.path.join(feature_dir, fname + ".pkl")
+            midi_path_orig = os.path.join(midi_dir,    fname + ".mid")
+            if os.path.exists(spec_path) and os.path.exists(midi_path_orig):
+                ordered_entries.append((split, fname, spec_path))
 
-            # Must mirror cache_spec.build_midi_index: skip if either is missing
-            if not (os.path.exists(spec_path) and os.path.exists(midi_path_orig)):
-                continue
+    # ── Phase 2: load frame counts in parallel (I/O bound) ───────────────────
+    def _load_T(entry: tuple):
+        split, fname, spec_path = entry
+        try:
+            with open(spec_path, "rb") as fh:
+                spec_raw = pickle.load(fh)
+            if isinstance(spec_raw, (tuple, list)):
+                spec_raw = spec_raw[0]
+            if isinstance(spec_raw, torch.Tensor):
+                T = spec_raw.shape[-1]
+            else:
+                T = int(np.array(spec_raw).shape[-1])
+            return (split, fname, spec_path, T)
+        except Exception as exc:
+            print(f"  Skipping {fname}: {exc}")
+            return (split, fname, spec_path, None)
 
-            # Load spec to count frames without keeping data in memory
-            try:
-                with open(spec_path, "rb") as fh:
-                    spec_raw = pickle.load(fh)
-                if isinstance(spec_raw, (tuple, list)):
-                    spec_raw = spec_raw[0]
-                if isinstance(spec_raw, torch.Tensor):
-                    T = spec_raw.shape[-1]
-                else:
-                    T = int(np.array(spec_raw).shape[-1])
-                del spec_raw
-            except Exception as exc:
-                print(f"  Skipping {fname}: {exc}")
-                continue
+    with ThreadPoolExecutor() as pool:
+        loaded = list(tqdm(
+            pool.map(_load_T, ordered_entries),
+            total=len(ordered_entries),
+            desc="building metadata",
+        ))
 
-            for s in range(0, T, num_frame):
-                e = min(s + num_frame, T)
-                cache_midi = os.path.join(midi_cache_dir, f"midi_{window_idx}.pkl")
-                cache_ts   = os.path.join(midi_cache_dir, f"ts_target_{window_idx}.pkl")
+    # ── Phase 3: assign window indices sequentially (must match cache_spec) ──
+    window_idx = 0
+    for split, fname, spec_path, T in loaded:
+        if T is None:
+            continue
+        for s in range(0, T, num_frame):
+            e = min(s + num_frame, T)
+            cache_midi = os.path.join(midi_cache_dir, f"midi_{window_idx}.pkl")
+            cache_ts   = os.path.join(midi_cache_dir, f"ts_target_{window_idx}.pkl")
 
-                if os.path.exists(cache_midi) and os.path.exists(cache_ts):
-                    split_meta[split].append({
-                        "midi_path":      cache_midi,
-                        "ts_target_path": cache_ts,
-                        "orig_spec_path": spec_path,
-                        "start_frame":    s,
-                        "end_frame":      e,
-                    })
+            if os.path.exists(cache_midi) and os.path.exists(cache_ts):
+                split_meta[split].append({
+                    "midi_path":      cache_midi,
+                    "ts_target_path": cache_ts,
+                    "orig_spec_path": spec_path,
+                    "start_frame":    s,
+                    "end_frame":      e,
+                })
 
-                window_idx += 1
+            window_idx += 1
 
     for split, meta in split_meta.items():
         print(f"  {split}: {len(meta)} windows")
