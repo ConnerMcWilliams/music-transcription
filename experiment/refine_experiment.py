@@ -626,14 +626,20 @@ def main() -> None:
     print(f"Device: {device}")
 
     # ── Wandb ─────────────────────────────────────────────────────────────────
-    if args.wandb_offline:
-        os.environ["WANDB_MODE"] = "offline"
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    is_main = local_rank == 0
 
-    wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_name,
-        config=vars(args),
-    )
+    if is_main:
+        if args.wandb_offline:
+            os.environ["WANDB_MODE"] = "offline"
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name,
+            config=vars(args),
+        )
+    else:
+        os.environ["WANDB_MODE"] = "disabled"
+        wandb.init(mode="disabled")
 
     # ── Data ─────────────────────────────────────────────────────────────────
     print("Building metadata...")
