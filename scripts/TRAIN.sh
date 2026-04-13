@@ -20,5 +20,5 @@ NGPUS=${NGPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}
 NGPUS=${NGPUS:-1}
 
 torchrun --nproc_per_node=$NGPUS \
-    $CURRENT_DIR/../experiment/experiment.py \
+    $CURRENT_DIR/../experiment/refine_experiment.py \
     --seed          0
