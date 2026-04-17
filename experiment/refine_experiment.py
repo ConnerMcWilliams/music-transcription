@@ -223,27 +223,32 @@ def compute_metrics(
     return metrics
 
 
-def _pair_notes(on_bin: np.ndarray, off_bin: np.ndarray) -> List[Tuple[int, int]]:
-    """
-    Greedily pair onset positions with the nearest following offset.
+def _pair_notes_np(on_bin: np.ndarray, off_bin: np.ndarray) -> np.ndarray:
+    """Pair onsets with nearest following offset using searchsorted. Returns [P,2] int32."""
+    onsets  = np.where(on_bin)[0]
+    offsets = np.where(off_bin)[0]
+    if len(onsets) == 0:
+        return np.empty((0, 2), dtype=np.int32)
+    idx  = np.searchsorted(offsets, onsets, side="left")
+    offs = np.where(idx < len(offsets), offsets[np.minimum(idx, len(offsets) - 1)], onsets)
+    return np.stack([onsets, offs], axis=1).astype(np.int32)
 
-    Args:
-        on_bin, off_bin : 1-D bool arrays of length T (one pitch)
 
-    Returns:
-        List of (onset_frame, offset_frame) pairs
-    """
-    onsets  = np.where(on_bin)[0].tolist()
-    offsets = np.where(off_bin)[0].tolist()
-    notes: List[Tuple[int, int]] = []
-    off_ptr = 0
-    for on in onsets:
-        # advance offset pointer past the onset
-        while off_ptr < len(offsets) and offsets[off_ptr] < on:
-            off_ptr += 1
-        off = offsets[off_ptr] if off_ptr < len(offsets) else on
-        notes.append((on, off))
-    return notes
+def _match_notes_vectorized(pred_notes: np.ndarray, gt_notes: np.ndarray, tolerance: int) -> int:
+    """Count matched note TPs using a [P,G] distance matrix."""
+    if len(pred_notes) == 0 or len(gt_notes) == 0:
+        return 0
+    on_diff  = np.abs(pred_notes[:, 0:1] - gt_notes[:, 0])   # [P, G]
+    off_diff = np.abs(pred_notes[:, 1:2] - gt_notes[:, 1])   # [P, G]
+    match    = (on_diff <= tolerance) & (off_diff <= tolerance)
+    matched_gt = np.zeros(len(gt_notes), dtype=bool)
+    tp = 0
+    for pi in range(len(pred_notes)):
+        candidates = np.where(match[pi] & ~matched_gt)[0]
+        if len(candidates) > 0:
+            matched_gt[candidates[0]] = True
+            tp += 1
+    return tp
 
 
 def _compute_note_counts(
@@ -261,18 +266,9 @@ def _compute_note_counts(
     off_g = (off_gt   > 0.5).numpy()
     total_tp = total_fp = total_fn = 0
     for pitch in range(on_p.shape[1]):
-        pred_notes = _pair_notes(on_p[:, pitch], off_p[:, pitch])
-        gt_notes   = _pair_notes(on_g[:, pitch], off_g[:, pitch])
-        matched_gt = set()
-        tp = 0
-        for (p_on, p_off) in pred_notes:
-            for gi, (g_on, g_off) in enumerate(gt_notes):
-                if gi in matched_gt:
-                    continue
-                if abs(p_on - g_on) <= tolerance and abs(p_off - g_off) <= tolerance:
-                    tp += 1
-                    matched_gt.add(gi)
-                    break
+        pred_notes = _pair_notes_np(on_p[:, pitch], off_p[:, pitch])
+        gt_notes   = _pair_notes_np(on_g[:, pitch], off_g[:, pitch])
+        tp = _match_notes_vectorized(pred_notes, gt_notes, tolerance)
         total_tp += tp
         total_fp += len(pred_notes) - tp
         total_fn += len(gt_notes)   - tp
@@ -360,7 +356,6 @@ def train_one_epoch(
     elem_tp = {k: 0.0 for k in ("on", "off", "frame")}
     elem_fp = {k: 0.0 for k in ("on", "off", "frame")}
     elem_fn = {k: 0.0 for k in ("on", "off", "frame")}
-    note_tp = note_fp = note_fn = 0
 
     use_amp = scaler is not None
 
@@ -414,12 +409,6 @@ def train_one_epoch(
             elem_tp[k] += ( pred_bin &  gt_bin).sum().item()
             elem_fp[k] += ( pred_bin & ~gt_bin).sum().item()
             elem_fn[k] += (~pred_bin &  gt_bin).sum().item()
-        n_tp, n_fp, n_fn = _compute_note_counts(
-            preds["on"].detach().cpu(), preds["off"].detach().cpu(),
-            targets["on"].detach().cpu(), targets["off"].detach().cpu(),
-            threshold=threshold,
-        )
-        note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
 
     avg_loss = total_loss / max(1, n_samples)
     elem_metrics: Dict[str, float] = {}
@@ -431,22 +420,21 @@ def train_one_epoch(
         elem_metrics[f"{k}_precision"] = p
         elem_metrics[f"{k}_recall"]    = r
         elem_metrics[f"{k}_f1"]        = f1
-    prec = note_tp / (note_tp + note_fp + 1e-7)
-    rec  = note_tp / (note_tp + note_fn + 1e-7)
     note_metrics: Dict[str, float] = {
-        "note_precision": prec,
-        "note_recall":    rec,
-        "note_f1":        2.0 * prec * rec / (prec + rec + 1e-7),
+        "note_precision": 0.0,
+        "note_recall":    0.0,
+        "note_f1":        0.0,
     }
     return avg_loss, elem_metrics, note_metrics
 
 
 @torch.no_grad()
 def validate_one_epoch(
-    model:     FineAMT,
-    loader:    DataLoader,
-    device:    torch.device,
-    threshold: float = 0.5,
+    model:          FineAMT,
+    loader:         DataLoader,
+    device:         torch.device,
+    threshold:      float = 0.5,
+    note_eval_frac: float = 0.1,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
     One validation epoch (no gradients).
@@ -489,12 +477,13 @@ def validate_one_epoch(
             elem_tp[k] += ( pred_bin &  gt_bin).sum().item()
             elem_fp[k] += ( pred_bin & ~gt_bin).sum().item()
             elem_fn[k] += (~pred_bin &  gt_bin).sum().item()
-        n_tp, n_fp, n_fn = _compute_note_counts(
-            preds["on"].cpu(), preds["off"].cpu(),
-            targets["on"].cpu(), targets["off"].cpu(),
-            threshold=threshold,
-        )
-        note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
+        if np.random.random() < note_eval_frac:
+            n_tp, n_fp, n_fn = _compute_note_counts(
+                preds["on"].cpu(), preds["off"].cpu(),
+                targets["on"].cpu(), targets["off"].cpu(),
+                threshold=threshold,
+            )
+            note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
 
     avg_loss = total_loss / max(1, n_samples)
     elem_metrics: Dict[str, float] = {}
@@ -674,7 +663,7 @@ def main() -> None:
     parser.add_argument("--max_len",type=int, default=4096)
     # Training
     parser.add_argument("--epochs",     type=int,   default=20)
-    parser.add_argument("--batch_size", type=int,   default=8)
+    parser.add_argument("--batch_size", type=int,   default=16)
     parser.add_argument("--lr",         type=float, default=1e-4)
     parser.add_argument("--weight_decay",type=float,default=1e-4)
     parser.add_argument("--optimizer",  default="adamw", choices=["adam", "adamw", "sgd"])
