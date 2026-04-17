@@ -246,6 +246,39 @@ def _pair_notes(on_bin: np.ndarray, off_bin: np.ndarray) -> List[Tuple[int, int]
     return notes
 
 
+def _compute_note_counts(
+    on_pred:   torch.Tensor,
+    off_pred:  torch.Tensor,
+    on_gt:     torch.Tensor,
+    off_gt:    torch.Tensor,
+    threshold: float = 0.5,
+    tolerance: int   = 2,
+) -> Tuple[int, int, int]:
+    """Return cumulative (tp, fp, fn) for note-level matching across all pitches."""
+    on_p  = (on_pred  > threshold).numpy()
+    off_p = (off_pred > threshold).numpy()
+    on_g  = (on_gt    > 0.5).numpy()
+    off_g = (off_gt   > 0.5).numpy()
+    total_tp = total_fp = total_fn = 0
+    for pitch in range(on_p.shape[1]):
+        pred_notes = _pair_notes(on_p[:, pitch], off_p[:, pitch])
+        gt_notes   = _pair_notes(on_g[:, pitch], off_g[:, pitch])
+        matched_gt = set()
+        tp = 0
+        for (p_on, p_off) in pred_notes:
+            for gi, (g_on, g_off) in enumerate(gt_notes):
+                if gi in matched_gt:
+                    continue
+                if abs(p_on - g_on) <= tolerance and abs(p_off - g_off) <= tolerance:
+                    tp += 1
+                    matched_gt.add(gi)
+                    break
+        total_tp += tp
+        total_fp += len(pred_notes) - tp
+        total_fn += len(gt_notes)   - tp
+    return total_tp, total_fp, total_fn
+
+
 def compute_note_f1(
     on_pred:  torch.Tensor,
     off_pred: torch.Tensor,
@@ -265,34 +298,9 @@ def compute_note_f1(
     Returns:
         {note_precision, note_recall, note_f1}
     """
-    on_p  = (on_pred  > threshold).numpy()
-    off_p = (off_pred > threshold).numpy()
-    on_g  = (on_gt    > 0.5).numpy()
-    off_g = (off_gt   > 0.5).numpy()
-
-    total_tp = total_fp = total_fn = 0
-
-    for pitch in range(on_p.shape[1]):
-        pred_notes = _pair_notes(on_p[:, pitch],  off_p[:, pitch])
-        gt_notes   = _pair_notes(on_g[:, pitch],  off_g[:, pitch])
-
-        matched_gt = set()
-        tp = 0
-        for (p_on, p_off) in pred_notes:
-            for gi, (g_on, g_off) in enumerate(gt_notes):
-                if gi in matched_gt:
-                    continue
-                if abs(p_on - g_on) <= tolerance and abs(p_off - g_off) <= tolerance:
-                    tp += 1
-                    matched_gt.add(gi)
-                    break
-
-        fp = len(pred_notes) - tp
-        fn = len(gt_notes)   - tp
-        total_tp += tp
-        total_fp += fp
-        total_fn += fn
-
+    total_tp, total_fp, total_fn = _compute_note_counts(
+        on_pred, off_pred, on_gt, off_gt, threshold, tolerance
+    )
     prec = total_tp / (total_tp + total_fp + 1e-7)
     rec  = total_tp / (total_tp + total_fn + 1e-7)
     f1   = 2.0 * prec * rec / (prec + rec + 1e-7)
@@ -335,21 +343,24 @@ def train_one_epoch(
     device:     torch.device,
     scheduler:  Optional[object] = None,
     scaler:     Optional[torch.amp.GradScaler] = None,
-) -> Tuple[float, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    threshold:  float = 0.5,
+) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
     One training epoch.
 
     Returns:
-        avg_loss   : scalar float
-        all_preds  : {k: [N_epoch, 128]}  on CPU
-        all_targets: {k: [N_epoch, 128]}  on CPU
+        avg_loss     : scalar float
+        elem_metrics : {k_precision, k_recall, k_f1} for on / off / frame
+        note_metrics : {note_precision, note_recall, note_f1}
     """
     model.train()
-    total_loss  = 0.0
-    n_samples   = 0
+    total_loss = 0.0
+    n_samples  = 0
 
-    all_preds:   Dict[str, List[torch.Tensor]] = {"on": [], "off": [], "frame": []}
-    all_targets: Dict[str, List[torch.Tensor]] = {"on": [], "off": [], "frame": []}
+    elem_tp = {k: 0.0 for k in ("on", "off", "frame")}
+    elem_fp = {k: 0.0 for k in ("on", "off", "frame")}
+    elem_fn = {k: 0.0 for k in ("on", "off", "frame")}
+    note_tp = note_fp = note_fn = 0
 
     use_amp = scaler is not None
 
@@ -396,35 +407,63 @@ def train_one_epoch(
         n_samples  += n
 
         for k in ("on", "off", "frame"):
-            all_preds[k].append(preds[k].detach().cpu())
-            all_targets[k].append(targets[k].detach().cpu())
+            p = preds[k].detach().cpu()
+            t = targets[k].detach().cpu()
+            pred_bin = p > threshold
+            gt_bin   = t > 0.5
+            elem_tp[k] += ( pred_bin &  gt_bin).sum().item()
+            elem_fp[k] += ( pred_bin & ~gt_bin).sum().item()
+            elem_fn[k] += (~pred_bin &  gt_bin).sum().item()
+        n_tp, n_fp, n_fn = _compute_note_counts(
+            preds["on"].detach().cpu(), preds["off"].detach().cpu(),
+            targets["on"].detach().cpu(), targets["off"].detach().cpu(),
+            threshold=threshold,
+        )
+        note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
 
-    avg_loss   = total_loss / max(1, n_samples)
-    epoch_preds   = {k: torch.cat(v, dim=0) for k, v in all_preds.items()}
-    epoch_targets = {k: torch.cat(v, dim=0) for k, v in all_targets.items()}
-    return avg_loss, epoch_preds, epoch_targets
+    avg_loss = total_loss / max(1, n_samples)
+    elem_metrics: Dict[str, float] = {}
+    for k in ("on", "off", "frame"):
+        tp, fp, fn = elem_tp[k], elem_fp[k], elem_fn[k]
+        p  = tp / (tp + fp + 1e-7)
+        r  = tp / (tp + fn + 1e-7)
+        f1 = 2.0 * p * r / (p + r + 1e-7)
+        elem_metrics[f"{k}_precision"] = p
+        elem_metrics[f"{k}_recall"]    = r
+        elem_metrics[f"{k}_f1"]        = f1
+    prec = note_tp / (note_tp + note_fp + 1e-7)
+    rec  = note_tp / (note_tp + note_fn + 1e-7)
+    note_metrics: Dict[str, float] = {
+        "note_precision": prec,
+        "note_recall":    rec,
+        "note_f1":        2.0 * prec * rec / (prec + rec + 1e-7),
+    }
+    return avg_loss, elem_metrics, note_metrics
 
 
 @torch.no_grad()
 def validate_one_epoch(
-    model:  FineAMT,
-    loader: DataLoader,
-    device: torch.device,
-) -> Tuple[float, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    model:     FineAMT,
+    loader:    DataLoader,
+    device:    torch.device,
+    threshold: float = 0.5,
+) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
     One validation epoch (no gradients).
 
     Returns:
-        avg_loss   : scalar float
-        all_preds  : {k: [N_epoch, 128]}  on CPU
-        all_targets: {k: [N_epoch, 128]}  on CPU
+        avg_loss     : scalar float
+        elem_metrics : {k_precision, k_recall, k_f1} for on / off / frame
+        note_metrics : {note_precision, note_recall, note_f1}
     """
     model.eval()
-    total_loss  = 0.0
-    n_samples   = 0
+    total_loss = 0.0
+    n_samples  = 0
 
-    all_preds:   Dict[str, List[torch.Tensor]] = {"on": [], "off": [], "frame": []}
-    all_targets: Dict[str, List[torch.Tensor]] = {"on": [], "off": [], "frame": []}
+    elem_tp = {k: 0.0 for k in ("on", "off", "frame")}
+    elem_fp = {k: 0.0 for k in ("on", "off", "frame")}
+    elem_fn = {k: 0.0 for k in ("on", "off", "frame")}
+    note_tp = note_fp = note_fn = 0
 
     for batch in tqdm(loader, desc="val  ", leave=False):
         seq      = batch["sequence"].to(device)
@@ -443,13 +482,38 @@ def validate_one_epoch(
         n_samples  += n
 
         for k in ("on", "off", "frame"):
-            all_preds[k].append(preds[k].cpu())
-            all_targets[k].append(targets[k].cpu())
+            p = preds[k].cpu()
+            t = targets[k].cpu()
+            pred_bin = p > threshold
+            gt_bin   = t > 0.5
+            elem_tp[k] += ( pred_bin &  gt_bin).sum().item()
+            elem_fp[k] += ( pred_bin & ~gt_bin).sum().item()
+            elem_fn[k] += (~pred_bin &  gt_bin).sum().item()
+        n_tp, n_fp, n_fn = _compute_note_counts(
+            preds["on"].cpu(), preds["off"].cpu(),
+            targets["on"].cpu(), targets["off"].cpu(),
+            threshold=threshold,
+        )
+        note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
 
-    avg_loss      = total_loss / max(1, n_samples)
-    epoch_preds   = {k: torch.cat(v, dim=0) for k, v in all_preds.items()}
-    epoch_targets = {k: torch.cat(v, dim=0) for k, v in all_targets.items()}
-    return avg_loss, epoch_preds, epoch_targets
+    avg_loss = total_loss / max(1, n_samples)
+    elem_metrics: Dict[str, float] = {}
+    for k in ("on", "off", "frame"):
+        tp, fp, fn = elem_tp[k], elem_fp[k], elem_fn[k]
+        p  = tp / (tp + fp + 1e-7)
+        r  = tp / (tp + fn + 1e-7)
+        f1 = 2.0 * p * r / (p + r + 1e-7)
+        elem_metrics[f"{k}_precision"] = p
+        elem_metrics[f"{k}_recall"]    = r
+        elem_metrics[f"{k}_f1"]        = f1
+    prec = note_tp / (note_tp + note_fp + 1e-7)
+    rec  = note_tp / (note_tp + note_fn + 1e-7)
+    note_metrics: Dict[str, float] = {
+        "note_precision": prec,
+        "note_recall":    rec,
+        "note_f1":        2.0 * prec * rec / (prec + rec + 1e-7),
+    }
+    return avg_loss, elem_metrics, note_metrics
 
 
 # ============================================================================
@@ -739,24 +803,15 @@ def main() -> None:
         print(f"\n=== Epoch {epoch}/{args.epochs} ===")
 
         # ── Train ────────────────────────────────────────────────────────────
-        tr_loss, tr_preds, tr_targets = train_one_epoch(
+        tr_loss, tr_metrics, tr_note = train_one_epoch(
             model, train_loader, optimizer, device,
             scheduler=scheduler, scaler=scaler,
-        )
-        tr_metrics = compute_metrics(tr_preds, tr_targets, args.threshold)
-        tr_note    = compute_note_f1(
-            tr_preds["on"], tr_preds["off"],
-            tr_targets["on"], tr_targets["off"],
-            threshold = args.threshold,
+            threshold=args.threshold,
         )
 
         # ── Validate ─────────────────────────────────────────────────────────
-        va_loss, va_preds, va_targets = validate_one_epoch(model, val_loader, device)
-        va_metrics = compute_metrics(va_preds, va_targets, args.threshold)
-        va_note    = compute_note_f1(
-            va_preds["on"], va_preds["off"],
-            va_targets["on"], va_targets["off"],
-            threshold = args.threshold,
+        va_loss, va_metrics, va_note = validate_one_epoch(
+            model, val_loader, device, threshold=args.threshold,
         )
 
         # ── LR ───────────────────────────────────────────────────────────────
