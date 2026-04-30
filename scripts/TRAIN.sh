@@ -14,11 +14,27 @@ export PYTHONPATH=$CURRENT_DIR/..
 NGPUS=${NGPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}
 NGPUS=${NGPUS:-1}
 
-torchrun --nproc_per_node=1 \
-    $CURRENT_DIR/../experiment/refine_experiment.py \
-    --dataset_dir       $DATASET_DIR \
-    --checkpoint_dir    $CHECKPOINT_DIR \
-    --p_row             0.5 \
-    --p_flip            0.03 \
-    --lambda_correction 1.0 \
+TRAIN_SCRIPT=$CURRENT_DIR/../experiment/refine_experiment.py
+TRAIN_ARGS=(
+    --dataset_dir       "$DATASET_DIR"
+    --checkpoint_dir    "$CHECKPOINT_DIR"
+    --p_row             0.5
+    --p_flip            0.03
+    --lambda_correction 1.0
     --seed              0
+)
+
+if [ "$NGPUS" = "1" ]; then
+    # Skip torchrun for single-GPU so Python tracebacks aren't swallowed by the
+    # elastic launcher (it reports `error_file: <N/A>` since main isn't @record-decorated).
+    python "$TRAIN_SCRIPT" "${TRAIN_ARGS[@]}"
+else
+    export TORCHELASTIC_ERROR_FILE=/tmp/torchelastic_error.json
+    torchrun --nproc_per_node=$NGPUS "$TRAIN_SCRIPT" "${TRAIN_ARGS[@]}"
+    rc=$?
+    if [ $rc -ne 0 ] && [ -f "$TORCHELASTIC_ERROR_FILE" ]; then
+        echo "----- torchrun child failed; traceback from $TORCHELASTIC_ERROR_FILE -----"
+        cat "$TORCHELASTIC_ERROR_FILE"
+    fi
+    exit $rc
+fi
