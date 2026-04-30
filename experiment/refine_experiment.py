@@ -3,23 +3,22 @@ refine_experiment.py — Full training + validation pipeline for FineAMT.
 
 Usage:
     python experiment/refine_experiment.py \
-        --list_dir      dataset/corpus/MAESTRO-V3/list \
-        --feature_dir   dataset/corpus/MAESTRO-V3/feature \
-        --midi_dir      dataset/corpus/MAESTRO-V3/midi \
-        --midi_cache_dir dataset/corpus/MAESTRO-V3/norm \
+        --dataset_dir    dataset/corpus/MAESTRO-V3/built \
         --checkpoint_dir checkpoints/refine \
         --wandb_project  refine-amt \
         --epochs 20
+
+The dataset must have been pre-packed by ``python -m dataset.build_dataset``;
+``--dataset_dir`` points at the directory containing ``train/`` and ``valid/``
+subfolders of .npy / .npz arrays.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import pickle
 import random
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib
@@ -87,96 +86,6 @@ def collate_refine(batch: List[Dict]) -> Dict[str, object]:
         "midi_labels": midi_labels_pad,  # {k: [B, max_x, 128]}
         "midi_mask":   midi_mask,        # [B, max_x]
     }
-
-
-# ============================================================================
-# Metadata builder
-# ============================================================================
-
-def build_metadata(
-    list_dir: str,
-    feature_dir: str,
-    midi_dir: str,
-    midi_cache_dir: str,
-    num_frame: int,
-) -> Dict[str, List[Dict]]:
-    """
-    Build RefineDataset metadata dicts, grouped by split.
-
-    Mirrors the window-indexing logic of cache_spec.build_midi_index so that
-    global window indices match the midi_N.pkl / ts_target_N.pkl files written
-    by cache_spec.py.
-
-    Returns:
-        {"train": [...], "test": [...], "valid": [...]}
-        each entry is a dict with keys:
-            midi_path, ts_target_path, orig_spec_path, start_frame, end_frame
-    """
-    split_meta: Dict[str, List[Dict]] = {"train": [], "test": [], "valid": []}
-
-    # ── Phase 1: collect valid (split, fname, spec_path) in iteration order ──
-    ordered_entries: List[tuple] = []
-    for split in ("train", "test", "valid"):
-        list_path = os.path.join(list_dir, f"{split}.list")
-        if not os.path.exists(list_path):
-            continue
-        with open(list_path, "r", encoding="utf-8") as fh:
-            fnames = [line.strip() for line in fh if line.strip()]
-        for fname in fnames:
-            spec_path      = os.path.join(feature_dir, fname + ".pkl")
-            midi_path_orig = os.path.join(midi_dir,    fname + ".mid")
-            if os.path.exists(spec_path) and os.path.exists(midi_path_orig):
-                ordered_entries.append((split, fname, spec_path))
-
-    # ── Phase 2: load frame counts in parallel (I/O bound) ───────────────────
-    def _load_T(entry: tuple):
-        split, fname, spec_path = entry
-        try:
-            with open(spec_path, "rb") as fh:
-                spec_raw = pickle.load(fh)
-            if isinstance(spec_raw, (tuple, list)):
-                spec_raw = spec_raw[0]
-            if isinstance(spec_raw, torch.Tensor):
-                T = spec_raw.shape[-1]
-            else:
-                T = int(np.array(spec_raw).shape[-1])
-            return (split, fname, spec_path, T)
-        except Exception as exc:
-            print(f"  Skipping {fname}: {exc}")
-            return (split, fname, spec_path, None)
-
-    with ThreadPoolExecutor() as pool:
-        loaded = list(tqdm(
-            pool.map(_load_T, ordered_entries),
-            total=len(ordered_entries),
-            desc="building metadata",
-        ))
-
-    # ── Phase 3: assign window indices sequentially (must match cache_spec) ──
-    window_idx = 0
-    for split, fname, spec_path, T in loaded:
-        if T is None:
-            continue
-        for s in range(0, T, num_frame):
-            e = min(s + num_frame, T)
-            cache_midi = os.path.join(midi_cache_dir, f"midi_{window_idx}.pkl")
-            cache_ts   = os.path.join(midi_cache_dir, f"ts_target_{window_idx}.pkl")
-
-            if os.path.exists(cache_midi) and os.path.exists(cache_ts):
-                split_meta[split].append({
-                    "midi_path":      cache_midi,
-                    "ts_target_path": cache_ts,
-                    "orig_spec_path": spec_path,
-                    "start_frame":    s,
-                    "end_frame":      e,
-                })
-
-            window_idx += 1
-
-    for split, meta in split_meta.items():
-        print(f"  {split}: {len(meta)} windows")
-
-    return split_meta
 
 
 # ============================================================================
@@ -644,16 +553,11 @@ def main() -> None:
         description="Train FineAMT on RefineDataset with wandb logging."
     )
     # Paths
-    parser.add_argument("--list_dir",       required=True,  help="Dir with train/test/valid .list files")
-    parser.add_argument("--feature_dir",    required=True,  help="Spectrogram pickle dir  ({fname}.pkl)")
-    parser.add_argument("--midi_dir",       required=True,  help="Original MIDI dir  ({fname}.mid)")
-    parser.add_argument("--midi_cache_dir", required=True,  help="cache_spec.py output dir (midi_N.pkl)")
+    parser.add_argument("--dataset_dir",    required=True,  help="Pre-built dataset root (contains train/, valid/, test/ subdirs from dataset.build_dataset)")
     parser.add_argument("--checkpoint_dir", default="checkpoints/refine", help="Checkpoint output dir")
     # Dataset
-    parser.add_argument("--num_frame", type=int, default=128,  help="Frames per spectrogram window")
     parser.add_argument("--n_mels",    type=int, default=128,  help="Mel bins in spectrogram")
     parser.add_argument("--dt",        type=float, default=256/16000, help="Seconds per spec frame")
-    parser.add_argument("--cache_size",type=int, default=512,  help="Pickle LRU cache size")
     # Model
     parser.add_argument("--blocks", type=int, default=6,   help="Mamba2 block count")
     parser.add_argument("--dim",    type=int, default=256, help="Model d_model")
@@ -707,26 +611,15 @@ def main() -> None:
         wandb.init(mode="disabled")
 
     # ── Data ─────────────────────────────────────────────────────────────────
-    print("Building metadata...")
-    split_meta = build_metadata(
-        list_dir      = args.list_dir,
-        feature_dir   = args.feature_dir,
-        midi_dir      = args.midi_dir,
-        midi_cache_dir= args.midi_cache_dir,
-        num_frame     = args.num_frame,
-    )
-
     train_ds = RefineDataset(
-        metadata   = split_meta["train"],
-        n_mels     = args.n_mels,
-        dt         = args.dt,
-        cache_size = args.cache_size,
+        split_dir = os.path.join(args.dataset_dir, "train"),
+        n_mels    = args.n_mels,
+        dt        = args.dt,
     )
     val_ds = RefineDataset(
-        metadata   = split_meta["valid"],
-        n_mels     = args.n_mels,
-        dt         = args.dt,
-        cache_size = args.cache_size,
+        split_dir = os.path.join(args.dataset_dir, "valid"),
+        n_mels    = args.n_mels,
+        dt        = args.dt,
     )
     print(f"Train: {len(train_ds)} samples  Val: {len(val_ds)} samples")
 

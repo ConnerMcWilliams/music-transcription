@@ -83,7 +83,16 @@ python $DATASET_SCRIPTS/cache_spec.py \
     -d_out_midi $MIDI_NORM_DIR \
     -d_config $CONFIG_FILE
 
-# 8. convert txt to reference for evaluation
+# 8. pack per-split monolithic .npy arrays for RefineDataset (mmap-able)
+mkdir -p $DATASET_DIR
+python -m dataset.build_dataset \
+    -d_dataset $DATASET_DIR \
+    -d_list $LIST_DIR \
+    -d_feature $FEATURE_DIR \
+    -d_midi_cache $MIDI_NORM_DIR \
+    -d_config $CONFIG_FILE
+
+# 9. convert txt to reference for evaluation
 mkdir -p $REFERENCE_DIR
 python $DATASET_SCRIPTS/note2ref.py -f_list $LIST_DIR/valid.list \
     -d_note $NOTE_DIR \
