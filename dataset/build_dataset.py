@@ -264,6 +264,21 @@ def _fill_split(
     )
 
 
+def _detect_n_mels(records: List[dict]) -> Optional[int]:
+    """Peek at the first piece's spectrogram and return its mel-bin count."""
+    for rec in records:
+        try:
+            with open(rec["spec_path"], "rb") as fh:
+                raw = pickle.load(fh)
+            arr = _unwrap(raw)
+            if arr.ndim == 3:
+                arr = arr[0]
+            return int(arr.shape[0])
+        except Exception:
+            continue
+    return None
+
+
 def build(
     d_dataset: str,
     d_list: str,
@@ -288,6 +303,21 @@ def build(
         per_split[split] = records
         print(f"  enumerated {split}: {len(records)} windows (global_idx -> {global_idx})")
 
+    # Detect actual n_mels from the data; warn (don't fail) if config disagrees.
+    detected = None
+    for split in SPLITS:
+        if per_split[split]:
+            detected = _detect_n_mels(per_split[split])
+            break
+    if detected is None:
+        raise RuntimeError("No spectrogram pickles found — cannot detect n_mels.")
+    if detected != n_mels:
+        print(
+            f"  ! config n_mels={n_mels} but cached features have n_mels={detected}; "
+            f"using {detected} (the data wins)."
+        )
+    n_mels_effective = detected
+
     for split, records in per_split.items():
         if not records:
             print(f"  {split}: no records, skipping")
@@ -295,7 +325,7 @@ def build(
         _fill_split(
             split, records,
             out_dir=os.path.join(d_dataset, split),
-            n_mels=n_mels,
+            n_mels=n_mels_effective,
             label_pitch_dim=label_pitch_dim,
             dt=dt,
         )
