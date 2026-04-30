@@ -140,6 +140,9 @@ def _pair_notes_np(on_bin: np.ndarray, off_bin: np.ndarray) -> np.ndarray:
     offsets = np.where(off_bin)[0]
     if len(onsets) == 0:
         return np.empty((0, 2), dtype=np.int32)
+    if len(offsets) == 0:
+        # No offsets predicted — pair each onset with itself (zero-length note).
+        return np.stack([onsets, onsets], axis=1).astype(np.int32)
     idx  = np.searchsorted(offsets, onsets, side="left")
     offs = np.where(idx < len(offsets), offsets[np.minimum(idx, len(offsets) - 1)], onsets)
     return np.stack([onsets, offs], axis=1).astype(np.int32)
