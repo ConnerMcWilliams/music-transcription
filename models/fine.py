@@ -130,12 +130,13 @@ class FineAMT(nn.Module):
         ])
 
         self.norm = nn.LayerNorm(dim)
-        self.fine_head = OutputHead(dim, n_pitches)
+        self.fine_head       = OutputHead(dim, n_pitches)
+        self.correction_head = OutputHead(dim, n_pitches)
 
     def forward(
         self,
         batch: Dict,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Dict[str, torch.Tensor]]:
         """
         Args:
             batch: dict from collate_refine
@@ -143,8 +144,11 @@ class FineAMT(nn.Module):
                 "type_ids"  [B, max_len]  (-1 for padding positions)
 
         Returns:
-            fine_out    dict {k: [B, max_len, n_pitches]}
-                Non-zero only at positions where type_id == 1 (beat tokens).
+            {
+              "fine":       {k: [B, max_len, n_pitches]} — main predictions
+              "correction": {k: [B, max_len, n_pitches]} — denoised labels
+            }
+            Both are non-zero only at positions where type_id == 1 (beat tokens).
         """
         x        = batch["sequence"]   # [B, max_len, max_dim]
         type_ids = batch["type_ids"]   # [B, max_len]
@@ -160,9 +164,8 @@ class FineAMT(nn.Module):
             x = block(x)
         x = self.norm(x)
 
-        # Decode only beat-synchronous positions
-        fine_out = self.fine_head(x)
-        fine_mask = (type_ids == 1).unsqueeze(-1)
-        fine_out = {k: v * fine_mask for k, v in fine_out.items()}
+        beat_mask = (type_ids == 1).unsqueeze(-1)
+        fine_out       = {k: v * beat_mask for k, v in self.fine_head(x).items()}
+        correction_out = {k: v * beat_mask for k, v in self.correction_head(x).items()}
 
-        return fine_out
+        return {"fine": fine_out, "correction": correction_out}

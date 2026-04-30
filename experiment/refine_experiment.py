@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wandb
 from dataset.refine_dataset import RefineDataset
+from dataset.perturb import perturb_labels
 from models.fine import FineAMT
 from components.schedulers import make_optimizer, make_scheduler
 
@@ -216,80 +217,186 @@ def compute_note_f1(
 # Training / Validation
 # ============================================================================
 
-def _extract_beat_tensors(
-    fine_out:    Dict[str, torch.Tensor],
-    batch:       Dict[str, object],
-    device:      torch.device,
-) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+_KEYS = ("on", "off", "frame")
+
+
+def _move_batch(batch: Dict[str, object], device: torch.device) -> Dict[str, object]:
+    """Move every tensor leaf in a collated batch to ``device``."""
+    out: Dict[str, object] = {}
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.to(device, non_blocking=True)
+        elif isinstance(v, dict):
+            out[k] = {kk: vv.to(device, non_blocking=True) for kk, vv in v.items()}
+        else:
+            out[k] = v
+    return out
+
+
+def _splice_perturbed_into_sequence(
+    sequence:    torch.Tensor,         # [B, max_len, max_dim]
+    type_ids:    torch.Tensor,         # [B, max_len]
+    midi_mask:   torch.Tensor,         # [B, max_x]
+    perturbed:   Dict[str, torch.Tensor],   # {k: [B, max_x, P]}
+) -> torch.Tensor:
     """
-    Extract beat-position predictions and GT targets as flat [N, 128] tensors.
+    Replace the label-token rows of ``sequence`` (positions where type_id == 1)
+    with the perturbed labels concatenated along the feature axis.
 
-    beat_mask [B, max_len] selects every type_id==1 position in the batch.
-    midi_mask [B, max_x]   selects valid (non-padded) GT entries.
-    Both have the same total True count, so we can zip them.
+    The ordering of valid rows in ``midi_mask`` matches the ordering of
+    type_id==1 rows in ``sequence`` (both come from the dataset's stable sort
+    with labels appended after spec), so a flat scatter is correct.
     """
-    beat_mask: torch.Tensor = batch["type_ids"].to(device) == 1   # [B, max_len]
-    midi_mask: torch.Tensor = batch["midi_mask"].to(device)        # [B, max_x]
+    perturbed_concat = torch.cat([perturbed[k] for k in _KEYS], dim=-1)   # [B, max_x, 3P]
+    label_dim = perturbed_concat.shape[-1]
 
-    preds: Dict[str, torch.Tensor]   = {}
-    targets: Dict[str, torch.Tensor] = {}
+    seq = sequence.clone()
+    seq[type_ids == 1, :label_dim] = perturbed_concat[midi_mask]
+    return seq
 
-    for k in ("on", "off", "frame"):
-        preds[k]   = fine_out[k][beat_mask]                        # [N, 128]
-        targets[k] = batch["midi_labels"][k].to(device)[midi_mask] # [N, 128]
 
-    return preds, targets
+def _extract_beat_preds(
+    head_out:  Dict[str, torch.Tensor],   # {k: [B, max_len, P]}
+    type_ids:  torch.Tensor,              # [B, max_len]
+) -> Dict[str, torch.Tensor]:
+    """Gather head predictions at every type_id==1 position into [N, P]."""
+    beat_mask = type_ids == 1
+    return {k: head_out[k][beat_mask] for k in _KEYS}
+
+
+def _flat_targets(
+    midi_labels: Dict[str, torch.Tensor],   # {k: [B, max_x, P]}
+    midi_mask:   torch.Tensor,              # [B, max_x]
+) -> Dict[str, torch.Tensor]:
+    return {k: midi_labels[k][midi_mask] for k in _KEYS}
+
+
+def _step_loss(
+    model_out:        Dict[str, Dict[str, torch.Tensor]],
+    type_ids:         torch.Tensor,
+    midi_mask:        torch.Tensor,
+    midi_labels:      Dict[str, torch.Tensor],
+    correction_mask:  torch.Tensor,            # [B, max_x]
+    lambda_correction: float,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """Compute fine + correction BCE. Returns (loss, fine_preds, corr_preds, targets)."""
+    fine_preds       = _extract_beat_preds(model_out["fine"],       type_ids)
+    correction_preds = _extract_beat_preds(model_out["correction"], type_ids)
+    targets          = _flat_targets(midi_labels, midi_mask)
+
+    fine_loss = sum(F.binary_cross_entropy(fine_preds[k],       targets[k]) for k in _KEYS)
+
+    corrupt_flat = correction_mask[midi_mask]                      # [N]
+    if corrupt_flat.any():
+        corr_loss = sum(
+            F.binary_cross_entropy(
+                correction_preds[k][corrupt_flat],
+                targets[k][corrupt_flat],
+            )
+            for k in _KEYS
+        )
+    else:
+        corr_loss = fine_loss.new_zeros(())
+
+    loss = fine_loss + lambda_correction * corr_loss
+    return loss, fine_preds, correction_preds, targets
+
+
+def _accumulate_prf(
+    counts: Dict[str, Dict[str, float]],
+    preds:  Dict[str, torch.Tensor],
+    target: Dict[str, torch.Tensor],
+    threshold: float,
+) -> None:
+    for k in _KEYS:
+        p = preds[k].detach().cpu() > threshold
+        t = target[k].detach().cpu() > 0.5
+        counts["tp"][k] += ( p &  t).sum().item()
+        counts["fp"][k] += ( p & ~t).sum().item()
+        counts["fn"][k] += (~p &  t).sum().item()
+
+
+def _finalize_prf(counts: Dict[str, Dict[str, float]], prefix: str = "") -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for k in _KEYS:
+        tp, fp, fn = counts["tp"][k], counts["fp"][k], counts["fn"][k]
+        p  = tp / (tp + fp + 1e-7)
+        r  = tp / (tp + fn + 1e-7)
+        f1 = 2.0 * p * r / (p + r + 1e-7)
+        out[f"{prefix}{k}_precision"] = p
+        out[f"{prefix}{k}_recall"]    = r
+        out[f"{prefix}{k}_f1"]        = f1
+    return out
+
+
+def _new_counts() -> Dict[str, Dict[str, float]]:
+    return {kind: {k: 0.0 for k in _KEYS} for kind in ("tp", "fp", "fn")}
 
 
 def train_one_epoch(
-    model:      FineAMT,
-    loader:     DataLoader,
-    optimizer:  torch.optim.Optimizer,
-    device:     torch.device,
-    scheduler:  Optional[object] = None,
-    scaler:     Optional[torch.amp.GradScaler] = None,
-    threshold:  float = 0.5,
+    model:             FineAMT,
+    loader:            DataLoader,
+    optimizer:         torch.optim.Optimizer,
+    device:            torch.device,
+    scheduler:         Optional[object] = None,
+    scaler:            Optional[torch.amp.GradScaler] = None,
+    threshold:         float = 0.5,
+    p_row:             float = 0.5,
+    p_flip:            float = 0.03,
+    lambda_correction: float = 1.0,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
-    One training epoch.
+    One training epoch with label perturbation.
+
+    A fraction (~p_row) of beat-token rows are eligible for bit flips at rate
+    p_flip. The corrupted labels are spliced back into the input sequence so
+    the model sees errors; the correction head is supervised on the rows that
+    actually got flipped.
 
     Returns:
         avg_loss     : scalar float
-        elem_metrics : {k_precision, k_recall, k_f1} for on / off / frame
-        note_metrics : {note_precision, note_recall, note_f1}
+        elem_metrics : {fine/corr}_{on/off/frame}_{precision/recall/f1}
+        note_metrics : {note_precision, note_recall, note_f1}  (placeholder)
     """
     model.train()
     total_loss = 0.0
     n_samples  = 0
 
-    elem_tp = {k: 0.0 for k in ("on", "off", "frame")}
-    elem_fp = {k: 0.0 for k in ("on", "off", "frame")}
-    elem_fn = {k: 0.0 for k in ("on", "off", "frame")}
+    fine_counts = _new_counts()
+    corr_counts = _new_counts()
 
     use_amp = scaler is not None
 
     for batch in tqdm(loader, desc="train", leave=False):
-        seq      = batch["sequence"].to(device)
-        type_ids = batch["type_ids"].to(device)
+        batch = _move_batch(batch, device)
+        type_ids    = batch["type_ids"]
+        midi_mask   = batch["midi_mask"]
+        midi_labels = batch["midi_labels"]
 
-        model_batch = {"sequence": seq, "type_ids": type_ids}
+        # Perturb clean labels (CPU/GPU agnostic — uses tensors' device).
+        perturbed_labels, correction_mask = perturb_labels(
+            midi_labels, midi_mask, p_row=p_row, p_flip=p_flip,
+        )
+
+        seq_perturbed = _splice_perturbed_into_sequence(
+            batch["sequence"], type_ids, midi_mask, perturbed_labels,
+        )
+        model_batch = {"sequence": seq_perturbed, "type_ids": type_ids}
 
         optimizer.zero_grad(set_to_none=True)
 
         if use_amp:
             with torch.amp.autocast("cuda"):
-                fine_out = model(model_batch)
-                preds, targets = _extract_beat_tensors(fine_out, batch, device)
-                loss = sum(
-                    F.binary_cross_entropy(preds[k], targets[k])
-                    for k in ("on", "off", "frame")
+                model_out = model(model_batch)
+                loss, fine_preds, corr_preds, targets = _step_loss(
+                    model_out, type_ids, midi_mask, midi_labels,
+                    correction_mask, lambda_correction,
                 )
         else:
-            fine_out = model(model_batch)
-            preds, targets = _extract_beat_tensors(fine_out, batch, device)
-            loss = sum(
-                F.binary_cross_entropy(preds[k], targets[k])
-                for k in ("on", "off", "frame")
+            model_out = model(model_batch)
+            loss, fine_preds, corr_preds, targets = _step_loss(
+                model_out, type_ids, midi_mask, midi_labels,
+                correction_mask, lambda_correction,
             )
 
         if use_amp:
@@ -306,29 +413,23 @@ def train_one_epoch(
         if scheduler is not None:
             scheduler.step()
 
-        n = preds["on"].shape[0]
+        n = fine_preds["on"].shape[0]
         total_loss += loss.item() * n
         n_samples  += n
 
-        for k in ("on", "off", "frame"):
-            p = preds[k].detach().cpu()
-            t = targets[k].detach().cpu()
-            pred_bin = p > threshold
-            gt_bin   = t > 0.5
-            elem_tp[k] += ( pred_bin &  gt_bin).sum().item()
-            elem_fp[k] += ( pred_bin & ~gt_bin).sum().item()
-            elem_fn[k] += (~pred_bin &  gt_bin).sum().item()
+        _accumulate_prf(fine_counts, fine_preds, targets, threshold)
+
+        # Correction metrics measured only on actually-flipped rows.
+        corrupt_flat = correction_mask[midi_mask]
+        if corrupt_flat.any():
+            corr_preds_sub = {k: corr_preds[k][corrupt_flat]   for k in _KEYS}
+            corr_target    = {k: targets[k][corrupt_flat]      for k in _KEYS}
+            _accumulate_prf(corr_counts, corr_preds_sub, corr_target, threshold)
 
     avg_loss = total_loss / max(1, n_samples)
     elem_metrics: Dict[str, float] = {}
-    for k in ("on", "off", "frame"):
-        tp, fp, fn = elem_tp[k], elem_fp[k], elem_fn[k]
-        p  = tp / (tp + fp + 1e-7)
-        r  = tp / (tp + fn + 1e-7)
-        f1 = 2.0 * p * r / (p + r + 1e-7)
-        elem_metrics[f"{k}_precision"] = p
-        elem_metrics[f"{k}_recall"]    = r
-        elem_metrics[f"{k}_f1"]        = f1
+    elem_metrics.update(_finalize_prf(fine_counts, prefix="fine_"))
+    elem_metrics.update(_finalize_prf(corr_counts, prefix="corr_"))
     note_metrics: Dict[str, float] = {
         "note_precision": 0.0,
         "note_recall":    0.0,
@@ -339,71 +440,72 @@ def train_one_epoch(
 
 @torch.no_grad()
 def validate_one_epoch(
-    model:          FineAMT,
-    loader:         DataLoader,
-    device:         torch.device,
-    threshold:      float = 0.5,
-    note_eval_frac: float = 0.1,
+    model:             FineAMT,
+    loader:            DataLoader,
+    device:            torch.device,
+    threshold:         float = 0.5,
+    note_eval_frac:    float = 0.1,
+    p_row:             float = 0.5,
+    p_flip:            float = 0.03,
+    lambda_correction: float = 1.0,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
-    One validation epoch (no gradients).
-
-    Returns:
-        avg_loss     : scalar float
-        elem_metrics : {k_precision, k_recall, k_f1} for on / off / frame
-        note_metrics : {note_precision, note_recall, note_f1}
+    One validation epoch (no gradients), with the same perturbation regime as
+    training so the loss is comparable. Reports separate fine_/corr_ metrics
+    and a note-level F1 measured on the *fine* head.
     """
     model.eval()
     total_loss = 0.0
     n_samples  = 0
 
-    elem_tp = {k: 0.0 for k in ("on", "off", "frame")}
-    elem_fp = {k: 0.0 for k in ("on", "off", "frame")}
-    elem_fn = {k: 0.0 for k in ("on", "off", "frame")}
+    fine_counts = _new_counts()
+    corr_counts = _new_counts()
     note_tp = note_fp = note_fn = 0
 
     for batch in tqdm(loader, desc="val  ", leave=False):
-        seq      = batch["sequence"].to(device)
-        type_ids = batch["type_ids"].to(device)
+        batch = _move_batch(batch, device)
+        type_ids    = batch["type_ids"]
+        midi_mask   = batch["midi_mask"]
+        midi_labels = batch["midi_labels"]
 
-        fine_out = model({"sequence": seq, "type_ids": type_ids})
-        preds, targets = _extract_beat_tensors(fine_out, batch, device)
+        perturbed_labels, correction_mask = perturb_labels(
+            midi_labels, midi_mask, p_row=p_row, p_flip=p_flip,
+        )
+        seq_perturbed = _splice_perturbed_into_sequence(
+            batch["sequence"], type_ids, midi_mask, perturbed_labels,
+        )
+        model_out = model({"sequence": seq_perturbed, "type_ids": type_ids})
 
-        loss = sum(
-            F.binary_cross_entropy(preds[k], targets[k])
-            for k in ("on", "off", "frame")
+        loss, fine_preds, corr_preds, targets = _step_loss(
+            model_out, type_ids, midi_mask, midi_labels,
+            correction_mask, lambda_correction,
         )
 
-        n = preds["on"].shape[0]
+        n = fine_preds["on"].shape[0]
         total_loss += loss.item() * n
         n_samples  += n
 
-        for k in ("on", "off", "frame"):
-            p = preds[k].cpu()
-            t = targets[k].cpu()
-            pred_bin = p > threshold
-            gt_bin   = t > 0.5
-            elem_tp[k] += ( pred_bin &  gt_bin).sum().item()
-            elem_fp[k] += ( pred_bin & ~gt_bin).sum().item()
-            elem_fn[k] += (~pred_bin &  gt_bin).sum().item()
+        _accumulate_prf(fine_counts, fine_preds, targets, threshold)
+
+        corrupt_flat = correction_mask[midi_mask]
+        if corrupt_flat.any():
+            corr_preds_sub = {k: corr_preds[k][corrupt_flat] for k in _KEYS}
+            corr_target    = {k: targets[k][corrupt_flat]    for k in _KEYS}
+            _accumulate_prf(corr_counts, corr_preds_sub, corr_target, threshold)
+
         if np.random.random() < note_eval_frac:
             n_tp, n_fp, n_fn = _compute_note_counts(
-                preds["on"].cpu(), preds["off"].cpu(),
-                targets["on"].cpu(), targets["off"].cpu(),
+                fine_preds["on"].cpu(),  fine_preds["off"].cpu(),
+                targets["on"].cpu(),     targets["off"].cpu(),
                 threshold=threshold,
             )
             note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
 
     avg_loss = total_loss / max(1, n_samples)
     elem_metrics: Dict[str, float] = {}
-    for k in ("on", "off", "frame"):
-        tp, fp, fn = elem_tp[k], elem_fp[k], elem_fn[k]
-        p  = tp / (tp + fp + 1e-7)
-        r  = tp / (tp + fn + 1e-7)
-        f1 = 2.0 * p * r / (p + r + 1e-7)
-        elem_metrics[f"{k}_precision"] = p
-        elem_metrics[f"{k}_recall"]    = r
-        elem_metrics[f"{k}_f1"]        = f1
+    elem_metrics.update(_finalize_prf(fine_counts, prefix="fine_"))
+    elem_metrics.update(_finalize_prf(corr_counts, prefix="corr_"))
+
     prec = note_tp / (note_tp + note_fp + 1e-7)
     rec  = note_tp / (note_tp + note_fn + 1e-7)
     note_metrics: Dict[str, float] = {
@@ -474,12 +576,13 @@ def log_visualizations(
     sample = val_dataset[idx]
 
     # Build a single-sample batch
-    batch = collate_refine([sample])
-    seq      = batch["sequence"].to(device)
-    type_ids = batch["type_ids"].to(device)
+    batch = _move_batch(collate_refine([sample]), device)
+    seq      = batch["sequence"]
+    type_ids = batch["type_ids"]
 
     with torch.no_grad():
-        fine_out = model({"sequence": seq, "type_ids": type_ids})
+        model_out = model({"sequence": seq, "type_ids": type_ids})
+    fine_out = model_out["fine"]
 
     # ── spectrogram (spec tokens in chronological order) ──────────────────
     spec_mask = (type_ids[0] == 0)                     # [L]
@@ -489,10 +592,10 @@ def log_visualizations(
     spec_img  = spec_tok[:, :n_mels].T                 # [n_mels, T]
 
     # ── GT labels (beat tokens) ────────────────────────────────────────────
-    midi_mask = batch["midi_mask"][0]                  # [max_x]
-    gt_on  = batch["midi_labels"]["on"][0][midi_mask].numpy().T    # [128, x]
-    gt_off = batch["midi_labels"]["off"][0][midi_mask].numpy().T
-    gt_frm = batch["midi_labels"]["frame"][0][midi_mask].numpy().T
+    midi_mask = batch["midi_mask"][0].cpu()            # [max_x]
+    gt_on  = batch["midi_labels"]["on"][0][midi_mask].cpu().numpy().T    # [128, x]
+    gt_off = batch["midi_labels"]["off"][0][midi_mask].cpu().numpy().T
+    gt_frm = batch["midi_labels"]["frame"][0][midi_mask].cpu().numpy().T
 
     # ── predictions (beat tokens) ─────────────────────────────────────────
     beat_mask = (type_ids[0] == 1)
@@ -577,6 +680,13 @@ def main() -> None:
     parser.add_argument("--seed",       type=int,   default=0)
     parser.add_argument("--num_workers",type=int,   default=0)
     parser.add_argument("--amp",        action="store_true", help="Use automatic mixed precision")
+    # Label perturbation / correction head
+    parser.add_argument("--p_row",  type=float, default=0.5,
+                        help="Probability that a beat-token row is eligible for label flips")
+    parser.add_argument("--p_flip", type=float, default=0.03,
+                        help="Per-element flip probability inside an eligible row")
+    parser.add_argument("--lambda_correction", type=float, default=1.0,
+                        help="Weight on the correction-head BCE loss")
     # Wandb
     parser.add_argument("--wandb_project", default="refine-amt")
     parser.add_argument("--wandb_name",    default=None)
@@ -689,11 +799,15 @@ def main() -> None:
             model, train_loader, optimizer, device,
             scheduler=scheduler, scaler=scaler,
             threshold=args.threshold,
+            p_row=args.p_row, p_flip=args.p_flip,
+            lambda_correction=args.lambda_correction,
         )
 
         # ── Validate ─────────────────────────────────────────────────────────
         va_loss, va_metrics, va_note = validate_one_epoch(
             model, val_loader, device, threshold=args.threshold,
+            p_row=args.p_row, p_flip=args.p_flip,
+            lambda_correction=args.lambda_correction,
         )
 
         # ── LR ───────────────────────────────────────────────────────────────
@@ -702,9 +816,10 @@ def main() -> None:
         # ── Print summary ────────────────────────────────────────────────────
         print(
             f"  loss  train={tr_loss:.4f}  val={va_loss:.4f}  lr={current_lr:.2e}\n"
-            f"  onset  train_f1={tr_metrics['on_f1']:.4f}  val_f1={va_metrics['on_f1']:.4f}\n"
-            f"  frame  train_f1={tr_metrics['frame_f1']:.4f}  val_f1={va_metrics['frame_f1']:.4f}\n"
-            f"  note   train_f1={tr_note['note_f1']:.4f}  val_f1={va_note['note_f1']:.4f}"
+            f"  fine onset  train_f1={tr_metrics['fine_on_f1']:.4f}  val_f1={va_metrics['fine_on_f1']:.4f}\n"
+            f"  fine frame  train_f1={tr_metrics['fine_frame_f1']:.4f}  val_f1={va_metrics['fine_frame_f1']:.4f}\n"
+            f"  corr onset  train_f1={tr_metrics['corr_on_f1']:.4f}  val_f1={va_metrics['corr_on_f1']:.4f}\n"
+            f"  note         train_f1={tr_note['note_f1']:.4f}  val_f1={va_note['note_f1']:.4f}"
         )
 
         # ── Wandb log ─────────────────────────────────────────────────────────

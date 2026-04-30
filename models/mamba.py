@@ -18,7 +18,6 @@ class MambaEndToEnd() :
     
     def forward(self, x) :
         # x: [BATCH, N_SLICES, FREQ, TIME]
-        freq_slices = x.squeeze(0)
         for mamba_block in self.mamba_blocks :
             x = mamba_block(x)
         x = self.norm(x)
