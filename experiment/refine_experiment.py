@@ -34,6 +34,16 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import torch.multiprocessing as _torch_mp
+# DataLoader workers share tensors via /dev/shm with the default
+# 'file_descriptor' strategy. In Docker /dev/shm defaults to 64MB and worker
+# processes get killed (ConnectionResetError on the pin-memory thread). The
+# 'file_system' strategy uses regular tmp files instead.
+try:
+    _torch_mp.set_sharing_strategy("file_system")
+except RuntimeError:
+    pass
+
 import wandb
 from dataset.refine_dataset import RefineDataset
 from dataset.perturb import perturb_labels
