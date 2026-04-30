@@ -14,7 +14,7 @@ export PYTHONPATH=$CURRENT_DIR/..
 NGPUS=${NGPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}
 NGPUS=${NGPUS:-1}
 
-torchrun --nproc_per_node=$NGPUS \
+torchrun --nproc_per_node=1 \
     $CURRENT_DIR/../experiment/refine_experiment.py \
     --dataset_dir       $DATASET_DIR \
     --checkpoint_dir    $CHECKPOINT_DIR \
