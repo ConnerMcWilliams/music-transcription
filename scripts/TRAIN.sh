@@ -18,6 +18,8 @@ TRAIN_SCRIPT=$CURRENT_DIR/../experiment/refine_experiment.py
 TRAIN_ARGS=(
     --dataset_dir       "$DATASET_DIR"
     --checkpoint_dir    "$CHECKPOINT_DIR"
+    --n_mels            256
+    --dt                0.016
     --p_row             0.5
     --p_flip            0.03
     --lambda_correction 1.0
