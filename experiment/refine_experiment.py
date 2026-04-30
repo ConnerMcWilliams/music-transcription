@@ -224,6 +224,27 @@ def compute_note_f1(
 _KEYS = ("on", "off", "frame")
 
 
+def _weighted_bce_or_focal(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    pos_weight: float,
+    focal_gamma: float = 0.0,
+) -> torch.Tensor:
+    """Element-wise weighted BCE with optional focal scaling on probabilities."""
+    pred = pred.clamp(1e-6, 1.0 - 1e-6)
+    bce = F.binary_cross_entropy(pred, target, reduction="none")
+    weights = 1.0 + (pos_weight - 1.0) * target
+
+    if focal_gamma > 0.0:
+        pt = pred * target + (1.0 - pred) * (1.0 - target)
+        focal = (1.0 - pt).pow(focal_gamma)
+        loss = bce * weights * focal
+    else:
+        loss = bce * weights
+
+    return loss.mean()
+
+
 def _move_batch(batch: Dict[str, object], device: torch.device) -> Dict[str, object]:
     """Move every tensor leaf in a collated batch to ``device``."""
     out: Dict[str, object] = {}
@@ -280,20 +301,46 @@ def _step_loss(
     midi_labels:      Dict[str, torch.Tensor],
     correction_mask:  torch.Tensor,            # [B, max_x]
     lambda_correction: float,
+    pos_weight_onset: float,
+    pos_weight_frame: float,
+    pos_weight_offset: float,
+    focal_gamma_onset: float,
+    focal_gamma_offset: float,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """Compute fine + correction BCE. Returns (loss, fine_preds, corr_preds, targets)."""
     fine_preds       = _extract_beat_preds(model_out["fine"],       type_ids)
     correction_preds = _extract_beat_preds(model_out["correction"], type_ids)
     targets          = _flat_targets(midi_labels, midi_mask)
 
-    fine_loss = sum(F.binary_cross_entropy(fine_preds[k],       targets[k]) for k in _KEYS)
+    pos_weights = {
+        "on": pos_weight_onset,
+        "frame": pos_weight_frame,
+        "off": pos_weight_offset,
+    }
+    focal_gammas = {
+        "on": focal_gamma_onset,
+        "frame": 0.0,
+        "off": focal_gamma_offset,
+    }
+
+    fine_loss = sum(
+        _weighted_bce_or_focal(
+            fine_preds[k],
+            targets[k],
+            pos_weight=pos_weights[k],
+            focal_gamma=focal_gammas[k],
+        )
+        for k in _KEYS
+    )
 
     corrupt_flat = correction_mask[midi_mask]                      # [N]
     if corrupt_flat.any():
         corr_loss = sum(
-            F.binary_cross_entropy(
+            _weighted_bce_or_focal(
                 correction_preds[k][corrupt_flat],
                 targets[k][corrupt_flat],
+                pos_weight=pos_weights[k],
+                focal_gamma=focal_gammas[k],
             )
             for k in _KEYS
         )
@@ -359,6 +406,11 @@ def train_one_epoch(
     p_row:             float = 0.5,
     p_flip:            float = 0.03,
     lambda_correction: float = 1.0,
+    pos_weight_onset:  float = 30.0,
+    pos_weight_frame:  float = 5.0,
+    pos_weight_offset: float = 40.0,
+    focal_gamma_onset: float = 2.0,
+    focal_gamma_offset: float = 2.0,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
     One training epoch with label perturbation.
@@ -406,12 +458,16 @@ def train_one_epoch(
                 loss, fine_preds, corr_preds, targets = _step_loss(
                     model_out, type_ids, midi_mask, midi_labels,
                     correction_mask, lambda_correction,
+                    pos_weight_onset, pos_weight_frame, pos_weight_offset,
+                    focal_gamma_onset, focal_gamma_offset,
                 )
         else:
             model_out = model(model_batch)
             loss, fine_preds, corr_preds, targets = _step_loss(
                 model_out, type_ids, midi_mask, midi_labels,
                 correction_mask, lambda_correction,
+                pos_weight_onset, pos_weight_frame, pos_weight_offset,
+                focal_gamma_onset, focal_gamma_offset,
             )
 
         if use_amp:
@@ -463,6 +519,14 @@ def validate_one_epoch(
     p_row:             float = 0.5,
     p_flip:            float = 0.03,
     lambda_correction: float = 1.0,
+    pos_weight_onset:  float = 30.0,
+    pos_weight_frame:  float = 5.0,
+    pos_weight_offset: float = 40.0,
+    focal_gamma_onset: float = 2.0,
+    focal_gamma_offset: float = 2.0,
+    sweep_min:         float = 0.03,
+    sweep_max:         float = 0.5,
+    sweep_steps:       int = 16,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
     One validation epoch (no gradients), with the same perturbation regime as
@@ -476,6 +540,15 @@ def validate_one_epoch(
     fine_counts = _new_counts()
     corr_counts = _new_counts()
     note_tp = note_fp = note_fn = 0
+    thresholds = torch.linspace(sweep_min, sweep_max, max(2, sweep_steps), dtype=torch.float32)
+    sweep_counts = {
+        k: {
+            "tp": torch.zeros_like(thresholds, dtype=torch.float64),
+            "fp": torch.zeros_like(thresholds, dtype=torch.float64),
+            "fn": torch.zeros_like(thresholds, dtype=torch.float64),
+        }
+        for k in _KEYS
+    }
 
     for batch in tqdm(loader, desc="val  ", leave=False):
         batch = _move_batch(batch, device)
@@ -494,6 +567,8 @@ def validate_one_epoch(
         loss, fine_preds, corr_preds, targets = _step_loss(
             model_out, type_ids, midi_mask, midi_labels,
             correction_mask, lambda_correction,
+            pos_weight_onset, pos_weight_frame, pos_weight_offset,
+            focal_gamma_onset, focal_gamma_offset,
         )
 
         n = fine_preds["on"].shape[0]
@@ -501,6 +576,15 @@ def validate_one_epoch(
         n_samples  += n
 
         _accumulate_prf(fine_counts, fine_preds, targets, threshold)
+
+        for k in _KEYS:
+            pred_k = fine_preds[k].detach().cpu()
+            tgt_k = (targets[k].detach().cpu() > 0.5)
+            pred_bin = pred_k.unsqueeze(0) > thresholds.view(-1, 1, 1)
+            tgt_exp = tgt_k.unsqueeze(0)
+            sweep_counts[k]["tp"] += (pred_bin & tgt_exp).sum(dim=(1, 2)).to(torch.float64)
+            sweep_counts[k]["fp"] += (pred_bin & ~tgt_exp).sum(dim=(1, 2)).to(torch.float64)
+            sweep_counts[k]["fn"] += ((~pred_bin) & tgt_exp).sum(dim=(1, 2)).to(torch.float64)
 
         corrupt_flat = correction_mask[midi_mask]
         if corrupt_flat.any():
@@ -520,6 +604,24 @@ def validate_one_epoch(
     elem_metrics: Dict[str, float] = {}
     elem_metrics.update(_finalize_prf(fine_counts, prefix="fine_"))
     elem_metrics.update(_finalize_prf(corr_counts, prefix="corr_"))
+
+    macro_f1 = torch.zeros_like(thresholds, dtype=torch.float64)
+    for k in _KEYS:
+        tp = sweep_counts[k]["tp"]
+        fp = sweep_counts[k]["fp"]
+        fn = sweep_counts[k]["fn"]
+        p = tp / (tp + fp + 1e-7)
+        r = tp / (tp + fn + 1e-7)
+        f1 = 2.0 * p * r / (p + r + 1e-7)
+        best_idx = int(torch.argmax(f1).item())
+        elem_metrics[f"sweep_best_{k}_threshold"] = float(thresholds[best_idx].item())
+        elem_metrics[f"sweep_best_{k}_f1"] = float(f1[best_idx].item())
+        macro_f1 += f1
+
+    macro_f1 = macro_f1 / len(_KEYS)
+    best_macro_idx = int(torch.argmax(macro_f1).item())
+    elem_metrics["sweep_best_macro_threshold"] = float(thresholds[best_macro_idx].item())
+    elem_metrics["sweep_best_macro_f1"] = float(macro_f1[best_macro_idx].item())
 
     prec = note_tp / (note_tp + note_fp + 1e-7)
     rec  = note_tp / (note_tp + note_fn + 1e-7)
@@ -543,8 +645,8 @@ def save_checkpoint(
     metrics:         Dict[str, float],
     checkpoint_dir:  str,
     config_snapshot: Dict,
-) -> None:
-    """Save model checkpoint.  Milestone every 5 epochs."""
+) -> Tuple[str, Optional[str]]:
+    """Save model checkpoint and return (main_path, milestone_path)."""
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     payload = {
@@ -559,10 +661,13 @@ def save_checkpoint(
     path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch:04d}.pt")
     torch.save(payload, path)
 
+    milestone: Optional[str] = None
     if epoch % 5 == 0:
         milestone = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch:04d}_milestone.pt")
         torch.save(payload, milestone)
         print(f"  Milestone checkpoint: {milestone}")
+
+    return path, milestone
 
 
 # ============================================================================
@@ -661,6 +766,46 @@ def log_visualizations(
     wandb.log({"viz/sample": wandb.Image(fig)}, step=epoch)
     plt.close(fig)
 
+    # Also log non-normalized probability maps from the fine head.
+    raw_fig, raw_axes = plt.subplots(1, 3, figsize=(18, 4))
+    raw_fig.suptitle(f"Epoch {epoch} - val sample {idx} (raw probabilities)", fontsize=11)
+    for col, (img, title) in enumerate(
+        [(pr_on, "Pred onset (raw)"), (pr_frm, "Pred frame (raw)"), (pr_off, "Pred offset (raw)")]
+    ):
+        raw_axes[col].imshow(img, aspect="auto", origin="lower", cmap=cmap_label,
+                             vmin=0, vmax=1)
+        raw_axes[col].set_title(title)
+        raw_axes[col].set_xlabel("beat subdivisions")
+        raw_axes[col].set_ylabel("pitch")
+
+    plt.tight_layout()
+    wandb.log({"viz/sample_raw": wandb.Image(raw_fig)}, step=epoch)
+    plt.close(raw_fig)
+
+
+def log_checkpoint_artifact(
+    checkpoint_path: str,
+    milestone_path: Optional[str],
+    epoch: int,
+    train_loss: float,
+    val_loss: float,
+    alias: str,
+) -> None:
+    """Upload checkpoint files to W&B Artifacts for durable model versioning."""
+    if wandb.run is None:
+        return
+
+    artifact = wandb.Artifact(
+        name=f"fineamt-checkpoint-{wandb.run.id}",
+        type="model",
+        metadata={"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss},
+    )
+    artifact.add_file(checkpoint_path, name=os.path.basename(checkpoint_path))
+    if milestone_path is not None:
+        artifact.add_file(milestone_path, name=os.path.basename(milestone_path))
+
+    wandb.log_artifact(artifact, aliases=[alias, f"epoch-{epoch:04d}"])
+
 
 # ============================================================================
 # Main
@@ -684,8 +829,8 @@ def main() -> None:
     parser.add_argument("--expand", type=int, default=2)
     parser.add_argument("--max_len",type=int, default=4096)
     # Training
-    parser.add_argument("--epochs",     type=int,   default=20)
-    parser.add_argument("--batch_size", type=int,   default=16)
+    parser.add_argument("--epochs",     type=int,   default=30)
+    parser.add_argument("--batch_size", type=int,   default=32)
     parser.add_argument("--lr",         type=float, default=1e-4)
     parser.add_argument("--weight_decay",type=float,default=1e-4)
     parser.add_argument("--optimizer",  default="adamw", choices=["adam", "adamw", "sgd"])
@@ -699,14 +844,34 @@ def main() -> None:
     # Label perturbation / correction head
     parser.add_argument("--p_row",  type=float, default=0.5,
                         help="Probability that a beat-token row is eligible for label flips")
-    parser.add_argument("--p_flip", type=float, default=0.03,
+    parser.add_argument("--p_flip", type=float, default=0.001,
                         help="Per-element flip probability inside an eligible row")
     parser.add_argument("--lambda_correction", type=float, default=1.0,
                         help="Weight on the correction-head BCE loss")
+    parser.add_argument("--pos_weight_onset", type=float, default=30.0,
+                        help="Positive-class weight for onset loss (recommended 20-50)")
+    parser.add_argument("--pos_weight_frame", type=float, default=5.0,
+                        help="Positive-class weight for frame loss (recommended 2-10)")
+    parser.add_argument("--pos_weight_offset", type=float, default=40.0,
+                        help="Positive-class weight for offset loss (recommended 20-80)")
+    parser.add_argument("--focal_gamma_onset", type=float, default=2.0,
+                        help="Focal gamma for onset loss (0 disables focal)")
+    parser.add_argument("--focal_gamma_offset", type=float, default=2.0,
+                        help="Focal gamma for offset loss (0 disables focal)")
+    parser.add_argument("--threshold_sweep_min", type=float, default=0.03,
+                        help="Minimum threshold for validation sweep")
+    parser.add_argument("--threshold_sweep_max", type=float, default=0.5,
+                        help="Maximum threshold for validation sweep")
+    parser.add_argument("--threshold_sweep_steps", type=int, default=16,
+                        help="Number of thresholds in validation sweep")
     # Wandb
     parser.add_argument("--wandb_project", default="refine-amt")
     parser.add_argument("--wandb_name",    default=None)
     parser.add_argument("--wandb_offline", action="store_true")
+    parser.add_argument("--wandb_log_checkpoints", action="store_true",
+                        help="Upload checkpoints to Weights & Biases Artifacts")
+    parser.add_argument("--wandb_ckpt_alias", default="latest",
+                        help="Alias for uploaded checkpoint artifacts")
     # Resume
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
 
@@ -819,6 +984,11 @@ def main() -> None:
             threshold=args.threshold,
             p_row=args.p_row, p_flip=args.p_flip,
             lambda_correction=args.lambda_correction,
+            pos_weight_onset=args.pos_weight_onset,
+            pos_weight_frame=args.pos_weight_frame,
+            pos_weight_offset=args.pos_weight_offset,
+            focal_gamma_onset=args.focal_gamma_onset,
+            focal_gamma_offset=args.focal_gamma_offset,
         )
 
         # ── Validate ─────────────────────────────────────────────────────────
@@ -826,6 +996,14 @@ def main() -> None:
             model, val_loader, device, threshold=args.threshold,
             p_row=args.p_row, p_flip=args.p_flip,
             lambda_correction=args.lambda_correction,
+            pos_weight_onset=args.pos_weight_onset,
+            pos_weight_frame=args.pos_weight_frame,
+            pos_weight_offset=args.pos_weight_offset,
+            focal_gamma_onset=args.focal_gamma_onset,
+            focal_gamma_offset=args.focal_gamma_offset,
+            sweep_min=args.threshold_sweep_min,
+            sweep_max=args.threshold_sweep_max,
+            sweep_steps=args.threshold_sweep_steps,
         )
 
         # ── LR ───────────────────────────────────────────────────────────────
@@ -837,6 +1015,7 @@ def main() -> None:
             f"  fine onset  train_f1={tr_metrics['fine_on_f1']:.4f}  val_f1={va_metrics['fine_on_f1']:.4f}\n"
             f"  fine frame  train_f1={tr_metrics['fine_frame_f1']:.4f}  val_f1={va_metrics['fine_frame_f1']:.4f}\n"
             f"  corr onset  train_f1={tr_metrics['corr_on_f1']:.4f}  val_f1={va_metrics['corr_on_f1']:.4f}\n"
+            f"  sweep best threshold={va_metrics['sweep_best_macro_threshold']:.3f}  macro_f1={va_metrics['sweep_best_macro_f1']:.4f}\n"
             f"  note         train_f1={tr_note['note_f1']:.4f}  val_f1={va_note['note_f1']:.4f}"
         )
 
@@ -860,8 +1039,20 @@ def main() -> None:
         all_metrics = {**{f"train_{k}": v for k, v in tr_metrics.items()},
                        **{f"val_{k}":   v for k, v in va_metrics.items()},
                        "train_loss": tr_loss, "val_loss": va_loss}
-        save_checkpoint(model, optimizer, scheduler, epoch,
-                        all_metrics, args.checkpoint_dir, config_snapshot)
+        ckpt_path, milestone_path = save_checkpoint(
+            model, optimizer, scheduler, epoch,
+            all_metrics, args.checkpoint_dir, config_snapshot,
+        )
+
+        if is_main and args.wandb_log_checkpoints and not args.wandb_offline:
+            log_checkpoint_artifact(
+                checkpoint_path=ckpt_path,
+                milestone_path=milestone_path,
+                epoch=epoch,
+                train_loss=tr_loss,
+                val_loss=va_loss,
+                alias=args.wandb_ckpt_alias,
+            )
 
         # ── Visualization ─────────────────────────────────────────────────────
         if len(val_ds) > 0:
