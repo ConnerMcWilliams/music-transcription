@@ -38,21 +38,22 @@ def perturb_labels(
                           element actually flipped (these are the rows the
                           correction head should be supervised on).
     """
+    keys = ("on", "off", "frame")
     on = midi_labels["on"]
     B, X, P = on.shape
     device = on.device
 
-    def _rand(*shape):
-        return torch.rand(*shape, device=device, generator=generator)
+    # Stack once and operate on the [3, B, X, P] block — one random tensor,
+    # one torch.where, one kernel launch instead of three.
+    stacked = torch.stack([midi_labels[k] for k in keys], dim=0)            # [3, B, X, P]
 
-    eligible = (_rand(B, X) < p_row) & midi_mask                   # [B, X]
-    any_flip = torch.zeros(B, X, dtype=torch.bool, device=device)
+    eligible = (torch.rand(B, X, device=device, generator=generator) < p_row) & midi_mask
+    flip = (
+        torch.rand(3, B, X, P, device=device, generator=generator) < p_flip
+    ) & eligible.unsqueeze(-1)                                              # [3, B, X, P]
 
-    perturbed: Dict[str, torch.Tensor] = {}
-    for k, v in midi_labels.items():
-        flip = (_rand(B, X, P) < p_flip) & eligible.unsqueeze(-1)  # [B, X, P]
-        perturbed[k] = torch.where(flip, 1.0 - v, v)
-        any_flip = any_flip | flip.any(dim=-1)
+    out = torch.where(flip, 1.0 - stacked, stacked)
+    perturbed = {k: out[i] for i, k in enumerate(keys)}
 
-    correction_mask = any_flip & midi_mask
+    correction_mask = flip.any(dim=-1).any(dim=0) & midi_mask
     return perturbed, correction_mask

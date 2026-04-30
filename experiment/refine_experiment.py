@@ -16,6 +16,7 @@ subfolders of .npy / .npz arrays.
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import random
 import sys
@@ -240,19 +241,17 @@ def _splice_perturbed_into_sequence(
     perturbed:   Dict[str, torch.Tensor],   # {k: [B, max_x, P]}
 ) -> torch.Tensor:
     """
-    Replace the label-token rows of ``sequence`` (positions where type_id == 1)
-    with the perturbed labels concatenated along the feature axis.
+    Write the perturbed labels into the label-token rows of ``sequence``
+    (positions where type_id == 1) **in place**.
 
-    The ordering of valid rows in ``midi_mask`` matches the ordering of
-    type_id==1 rows in ``sequence`` (both come from the dataset's stable sort
-    with labels appended after spec), so a flat scatter is correct.
+    The dataset leaves label rows zero, and ``_move_batch`` returns a fresh
+    GPU tensor that is not reused beyond this batch, so in-place mutation is
+    safe and avoids a ~100MB clone per step.
     """
     perturbed_concat = torch.cat([perturbed[k] for k in _KEYS], dim=-1)   # [B, max_x, 3P]
     label_dim = perturbed_concat.shape[-1]
-
-    seq = sequence.clone()
-    seq[type_ids == 1, :label_dim] = perturbed_concat[midi_mask]
-    return seq
+    sequence[type_ids == 1, :label_dim] = perturbed_concat[midi_mask]
+    return sequence
 
 
 def _extract_beat_preds(
@@ -308,12 +307,25 @@ def _accumulate_prf(
     target: Dict[str, torch.Tensor],
     threshold: float,
 ) -> None:
-    for k in _KEYS:
-        p = preds[k].detach().cpu() > threshold
-        t = target[k].detach().cpu() > 0.5
-        counts["tp"][k] += ( p &  t).sum().item()
-        counts["fp"][k] += ( p & ~t).sum().item()
-        counts["fn"][k] += (~p &  t).sum().item()
+    """
+    Compute tp/fp/fn on-device for all three keys, then transfer once.
+
+    Six separate ``.cpu()`` transfers per batch was the prior bottleneck on
+    the metric path; this issues a single device→host copy of a [3, 3] long
+    tensor.
+    """
+    p = torch.stack([preds[k].detach()  > threshold for k in _KEYS])  # [3, N, P]
+    t = torch.stack([target[k].detach() > 0.5       for k in _KEYS])
+
+    tp = ( p &  t).sum(dim=(1, 2))
+    fp = ( p & ~t).sum(dim=(1, 2))
+    fn = (~p &  t).sum(dim=(1, 2))
+    stats = torch.stack([tp, fp, fn]).cpu().tolist()                  # one transfer
+
+    for j, k in enumerate(_KEYS):
+        counts["tp"][k] += stats[0][j]
+        counts["fp"][k] += stats[1][j]
+        counts["fn"][k] += stats[2][j]
 
 
 def _finalize_prf(counts: Dict[str, Dict[str, float]], prefix: str = "") -> Dict[str, float]:
@@ -662,9 +674,9 @@ def main() -> None:
     parser.add_argument("--n_mels",    type=int, default=128,  help="Mel bins in spectrogram")
     parser.add_argument("--dt",        type=float, default=256/16000, help="Seconds per spec frame")
     # Model
-    parser.add_argument("--blocks", type=int, default=6,   help="Mamba2 block count")
-    parser.add_argument("--dim",    type=int, default=256, help="Model d_model")
-    parser.add_argument("--d_state",type=int, default=64)
+    parser.add_argument("--blocks", type=int, default=8,   help="Mamba2 block count")
+    parser.add_argument("--dim",    type=int, default=384, help="Model d_model")
+    parser.add_argument("--d_state",type=int, default=128)
     parser.add_argument("--d_conv", type=int, default=4)
     parser.add_argument("--expand", type=int, default=2)
     parser.add_argument("--max_len",type=int, default=4096)
@@ -678,7 +690,8 @@ def main() -> None:
                         choices=["onecycle", "cosine", "constant", "linear", "exponential"])
     parser.add_argument("--threshold",  type=float, default=0.5)
     parser.add_argument("--seed",       type=int,   default=0)
-    parser.add_argument("--num_workers",type=int,   default=0)
+    parser.add_argument("--num_workers",type=int,
+                        default=min(4, max(1, (os.cpu_count() or 2) // 2)))
     parser.add_argument("--amp",        action="store_true", help="Use automatic mixed precision")
     # Label perturbation / correction head
     parser.add_argument("--p_row",  type=float, default=0.5,
@@ -740,6 +753,8 @@ def main() -> None:
         pin_memory  = device.type == "cuda",
         persistent_workers = args.num_workers > 0,
     )
+    if args.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = 2
     train_loader = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
     val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
 
@@ -848,6 +863,11 @@ def main() -> None:
         # ── Visualization ─────────────────────────────────────────────────────
         if len(val_ds) > 0:
             log_visualizations(model, val_ds, epoch, device, args.threshold, np_rng)
+
+        # Bound memory growth across epochs without per-batch overhead.
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     wandb.finish()
     print("\nTraining complete.")

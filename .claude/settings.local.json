@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('experiment/refine_experiment.py'\\).read\\(\\)\\); ast.parse\\(open\\('dataset/refine_dataset.py'\\).read\\(\\)\\); ast.parse\\(open\\('dataset/perturb.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+    ]
+  }
+}

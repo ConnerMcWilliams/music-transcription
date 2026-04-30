@@ -23,3 +23,11 @@ class MambaEndToEnd() :
         x = self.norm(x)
             
         return x
+    
+class JambaEndToEnd() :
+    def __init__(self, d_model, d_state, d_conv, expand, blocks, patchout) :
+        pass
+    
+class AttentionHead() :
+    def __init__(self) :
+        pass

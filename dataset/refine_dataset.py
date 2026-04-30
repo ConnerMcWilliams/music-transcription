@@ -85,29 +85,26 @@ class RefineDataset(Dataset):
         T = e - s
         x = me - ms
 
-        on  = torch.from_numpy(self.midi_on   [ms:me].copy())              # [x, 128]
-        off = torch.from_numpy(self.midi_off  [ms:me].copy())
-        frm = torch.from_numpy(self.midi_frame[ms:me].copy())
-        ts  = torch.from_numpy(self.ts_target [ms:me].copy())              # [x]
+        midi_labels = {
+            "on":    torch.from_numpy(self.midi_on   [ms:me].copy()),     # [x, 128]
+            "off":   torch.from_numpy(self.midi_off  [ms:me].copy()),
+            "frame": torch.from_numpy(self.midi_frame[ms:me].copy()),
+        }
+        ts = torch.from_numpy(self.ts_target[ms:me].copy())                # [x]
 
-        midi_labels = {"on": on, "off": off, "frame": frm}
+        max_dim   = self.max_dim
+        total_len = T + x
 
-        max_dim = self.max_dim
+        spec_pos = torch.arange(T, dtype=torch.float32)
+        beat_pos = ts / self.dt                                            # window-relative
+        order    = torch.argsort(torch.cat([spec_pos, beat_pos]), stable=True)  # [T + x]
+        type_ids = (order >= T).long()
 
-        spec_tokens = torch.zeros(T, max_dim)
-        spec_tokens[:, :self.n_mels] = torch.from_numpy(self.spec[s:e].copy())
-
-        label_tokens = torch.zeros(x, max_dim)
-        label_tokens[:, :128]    = on
-        label_tokens[:, 128:256] = off
-        label_tokens[:, 256:384] = frm
-
-        spec_pos  = torch.arange(T, dtype=torch.float32)
-        beat_pos  = ts / self.dt                                           # window-relative
-        order     = torch.argsort(torch.cat([spec_pos, beat_pos]), stable=True)  # [T + x]
-
-        sequence  = torch.cat([spec_tokens, label_tokens], dim=0)[order]   # [T + x, max_dim]
-        type_ids  = (order >= T).long()
+        # Allocate the final sequence directly. Label rows stay zero — they
+        # will be filled in-place at training time with perturbed labels.
+        sequence = torch.zeros(total_len, max_dim)
+        spec_dst = (type_ids == 0).nonzero(as_tuple=True)[0]
+        sequence[spec_dst, :self.n_mels] = torch.from_numpy(self.spec[s:e].copy())
 
         return {
             "sequence":    sequence,
