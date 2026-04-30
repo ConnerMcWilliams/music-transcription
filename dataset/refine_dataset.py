@@ -15,11 +15,10 @@ Expected layout for ``split_dir``:
 from __future__ import annotations
 
 import os
-from typing import Dict, Tuple
+from typing import Dict
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 
@@ -42,8 +41,6 @@ class RefineDataset(Dataset):
         "type_ids"     : Tensor [T + x]            long
         "midi_labels"  : dict {"on","off","frame"} each [x, 128]
     """
-
-    _LABEL_KEYS: Tuple[str, ...] = ("on", "off", "frame")
 
     def __init__(
         self,
@@ -70,6 +67,8 @@ class RefineDataset(Dataset):
         self.midi_start = idx["midi_start"]
         self.midi_end   = idx["midi_end"]
 
+        self.max_dim = max(n_mels, 3 * label_pitch_dim)
+
         if self.spec.shape[1] != n_mels:
             raise ValueError(
                 f"spec.npy has {self.spec.shape[1]} mel bins but RefineDataset was "
@@ -83,38 +82,32 @@ class RefineDataset(Dataset):
         s,  e  = int(self.spec_start[index]), int(self.spec_end[index])
         ms, me = int(self.midi_start[index]), int(self.midi_end[index])
 
-        spec_tokens = torch.from_numpy(np.array(self.spec[s:e]))           # [T, n_mels]
-        on  = torch.from_numpy(np.array(self.midi_on   [ms:me]))           # [x, 128]
-        off = torch.from_numpy(np.array(self.midi_off  [ms:me]))
-        frm = torch.from_numpy(np.array(self.midi_frame[ms:me]))
-        ts  = torch.from_numpy(np.array(self.ts_target [ms:me]))           # [x]
+        T = e - s
+        x = me - ms
+
+        on  = torch.from_numpy(self.midi_on   [ms:me].copy())              # [x, 128]
+        off = torch.from_numpy(self.midi_off  [ms:me].copy())
+        frm = torch.from_numpy(self.midi_frame[ms:me].copy())
+        ts  = torch.from_numpy(self.ts_target [ms:me].copy())              # [x]
 
         midi_labels = {"on": on, "off": off, "frame": frm}
-        label_tokens = torch.cat(
-            [midi_labels[k] for k in self._LABEL_KEYS], dim=-1
-        )  # [x, 3*P]
 
-        T = spec_tokens.shape[0]
-        x = label_tokens.shape[0]
+        max_dim = self.max_dim
 
-        n_mels    = self.n_mels
-        label_dim = self.label_feature_dim
-        max_dim   = max(n_mels, label_dim)
-        if n_mels < max_dim:
-            spec_tokens = F.pad(spec_tokens, (0, max_dim - n_mels))
-        if label_dim < max_dim:
-            label_tokens = F.pad(label_tokens, (0, max_dim - label_dim))
+        spec_tokens = torch.zeros(T, max_dim)
+        spec_tokens[:, :self.n_mels] = torch.from_numpy(self.spec[s:e].copy())
 
-        spec_pos = torch.arange(T, dtype=torch.float32)
-        beat_pos = ts / self.dt                                            # window-relative
-        positions = torch.cat([spec_pos, beat_pos])                        # [T + x]
-        order = torch.argsort(positions, stable=True)                      # [T + x]
+        label_tokens = torch.zeros(x, max_dim)
+        label_tokens[:, :128]    = on
+        label_tokens[:, 128:256] = off
+        label_tokens[:, 256:384] = frm
 
-        sequence = torch.cat([spec_tokens, label_tokens], dim=0)[order]    # [T + x, max_dim]
-        type_ids = torch.cat([
-            torch.zeros(T, dtype=torch.long),
-            torch.ones(x,  dtype=torch.long),
-        ])[order]
+        spec_pos  = torch.arange(T, dtype=torch.float32)
+        beat_pos  = ts / self.dt                                           # window-relative
+        order     = torch.argsort(torch.cat([spec_pos, beat_pos]), stable=True)  # [T + x]
+
+        sequence  = torch.cat([spec_tokens, label_tokens], dim=0)[order]   # [T + x, max_dim]
+        type_ids  = (order >= T).long()
 
         return {
             "sequence":    sequence,
