@@ -592,9 +592,9 @@ def log_visualizations(
     spec_img  = spec_tok[:, :n_mels].T                 # [n_mels, T]
 
     # ── GT labels (beat tokens) ────────────────────────────────────────────
-    midi_mask = batch["midi_mask"][0].cpu()            # [max_x]
-    gt_on  = batch["midi_labels"]["on"][0][midi_mask].cpu().numpy().T    # [128, x]
-    gt_off = batch["midi_labels"]["off"][0][midi_mask].cpu().numpy().T
+    midi_mask = batch["midi_mask"][0]                  # [max_x] (on device)
+    gt_on  = batch["midi_labels"]["on"]   [0][midi_mask].cpu().numpy().T   # [128, x]
+    gt_off = batch["midi_labels"]["off"]  [0][midi_mask].cpu().numpy().T
     gt_frm = batch["midi_labels"]["frame"][0][midi_mask].cpu().numpy().T
 
     # ── predictions (beat tokens) ─────────────────────────────────────────
