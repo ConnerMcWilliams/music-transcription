@@ -880,11 +880,11 @@ def main() -> None:
                         help="Per-element flip probability inside an eligible row")
     parser.add_argument("--lambda_correction", type=float, default=1.0,
                         help="Weight on the correction-head BCE loss")
-    parser.add_argument("--pos_weight_onset", type=float, default=30.0,
+    parser.add_argument("--pos_weight_onset", type=float, default=20.0,
                         help="Positive-class weight for onset loss (recommended 20-50)")
-    parser.add_argument("--pos_weight_frame", type=float, default=5.0,
+    parser.add_argument("--pos_weight_frame", type=float, default=3.0,
                         help="Positive-class weight for frame loss (recommended 2-10)")
-    parser.add_argument("--pos_weight_offset", type=float, default=40.0,
+    parser.add_argument("--pos_weight_offset", type=float, default=20.0,
                         help="Positive-class weight for offset loss (recommended 20-80)")
     parser.add_argument("--focal_gamma_onset", type=float, default=2.0,
                         help="Focal gamma for onset loss (0 disables focal)")
