@@ -603,12 +603,23 @@ def validate_one_epoch(
             _accumulate_prf(corr_counts, corr_preds_sub, corr_target, threshold)
 
         if np.random.random() < note_eval_frac:
-            n_tp, n_fp, n_fn = _compute_note_counts(
-                fine_preds["on"].cpu(),  fine_preds["off"].cpu(),
-                targets["on"].cpu(),     targets["off"].cpu(),
-                threshold=threshold,
-            )
-            note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
+            # Pair notes per-sample: passing the flat batch-concatenated
+            # tensors here would let an onset from sample A pair with an
+            # offset from sample B via searchsorted.
+            fine_on  = model_out["fine"]["on"]
+            fine_off = model_out["fine"]["off"]
+            B = type_ids.shape[0]
+            for i in range(B):
+                ti = type_ids[i] == 1
+                mi = midi_mask[i]
+                if not ti.any() or not mi.any():
+                    continue
+                n_tp, n_fp, n_fn = _compute_note_counts(
+                    fine_on[i][ti].cpu(),                 fine_off[i][ti].cpu(),
+                    midi_labels["on"][i][mi].cpu(),       midi_labels["off"][i][mi].cpu(),
+                    threshold=threshold,
+                )
+                note_tp += n_tp; note_fp += n_fp; note_fn += n_fn
 
     avg_loss = total_loss / max(1, n_samples)
     elem_metrics: Dict[str, float] = {}
@@ -707,8 +718,17 @@ def log_visualizations(
 
     # Build a single-sample batch
     batch = _move_batch(collate_refine([sample]), device)
-    seq      = batch["sequence"]
-    type_ids = batch["type_ids"]
+    seq       = batch["sequence"]
+    type_ids  = batch["type_ids"]
+    midi_mask = batch["midi_mask"]
+
+    # Splice the clean labels into the label-token rows so the model sees the
+    # same input layout it was trained on. The dataset deliberately leaves
+    # those rows zero — without this, the model receives an OOD all-zero
+    # label block and outputs degenerate predictions.
+    seq = _splice_perturbed_into_sequence(
+        seq, type_ids, midi_mask, batch["midi_labels"],
+    )
 
     with torch.no_grad():
         model_out = model({"sequence": seq, "type_ids": type_ids})
