@@ -407,6 +407,12 @@ def main() -> None:
     )
     print(f"Train: {len(train_ds)} samples  Val: {len(val_ds)} samples")
 
+    # Use spawn for DataLoader workers. With fork, workers re-spawned at
+    # epoch boundaries inherit a CUDA-initialized parent and segfault; spawn
+    # launches fresh interpreters so they're immune to parent CUDA state.
+    import torch.multiprocessing as _mp
+    mp_ctx = _mp.get_context("spawn") if args.num_workers > 0 else None
+
     loader_kwargs = dict(
         batch_size=args.batch_size,
         collate_fn=collate_refine,
@@ -416,8 +422,15 @@ def main() -> None:
     )
     if args.num_workers > 0:
         loader_kwargs["prefetch_factor"] = 2
+        loader_kwargs["multiprocessing_context"] = mp_ctx
     train_loader = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
-    val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
+    # val keeps num_workers=0: cheap, eliminates any fork-after-CUDA risk.
+    val_loader_kwargs = dict(loader_kwargs)
+    val_loader_kwargs["num_workers"] = 0
+    val_loader_kwargs.pop("prefetch_factor", None)
+    val_loader_kwargs.pop("multiprocessing_context", None)
+    val_loader_kwargs["persistent_workers"] = False
+    val_loader   = DataLoader(val_ds,   shuffle=False, **val_loader_kwargs)
 
     # ── Model ────────────────────────────────────────────────────────────────
     model = FineAMT(
