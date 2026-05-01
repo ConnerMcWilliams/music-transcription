@@ -2,6 +2,11 @@
 # Train FineAMT using experiment.py with DDP (multi-GPU).
 # Consumes the pre-packed .npy/.npz arrays produced by step 8 of CACHE_DATASET.sh.
 
+# Raise the open-file-descriptor cap. With multiprocessing's "file_system"
+# sharing strategy, every shared tensor consumes an FD; the default 1024 is
+# blown through quickly when train+val loaders run with workers.
+ulimit -n 65536 || true
+
 CURRENT_DIR=$(pwd)
 MAESTRO_DIR=$CURRENT_DIR/../dataset/corpus/MAESTRO-V3
 DATASET_DIR=$MAESTRO_DIR/dataset                  # contains train/, valid/, test/ subdirs

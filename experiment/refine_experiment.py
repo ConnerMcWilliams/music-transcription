@@ -870,8 +870,12 @@ def main() -> None:
                         choices=["onecycle", "cosine", "constant", "linear", "exponential"])
     parser.add_argument("--threshold",  type=float, default=0.5)
     parser.add_argument("--seed",       type=int,   default=0)
-    parser.add_argument("--num_workers",type=int,
-                        default=min(4, max(1, (os.cpu_count() or 2) // 2)))
+    parser.add_argument("--num_workers",type=int, default=2)
+    parser.add_argument("--persistent_workers", action="store_true",
+                        help="Keep DataLoader workers alive across epochs. "
+                             "Off by default: with the file_system sharing "
+                             "strategy and two loaders (train+val) live at "
+                             "once, FD count climbs and workers SIGABRT.")
     parser.add_argument("--amp",        action="store_true", help="Use automatic mixed precision")
     # Label perturbation / correction head
     parser.add_argument("--p_row",  type=float, default=0.5,
@@ -951,7 +955,7 @@ def main() -> None:
         collate_fn  = collate_refine,
         num_workers = args.num_workers,
         pin_memory  = device.type == "cuda",
-        persistent_workers = args.num_workers > 0,
+        persistent_workers = args.persistent_workers and args.num_workers > 0,
     )
     if args.num_workers > 0:
         loader_kwargs["prefetch_factor"] = 2
