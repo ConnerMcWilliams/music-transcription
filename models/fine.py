@@ -79,6 +79,86 @@ class OutputHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Mixture of Experts
+# ---------------------------------------------------------------------------
+
+class SparseMoE(nn.Module):
+    """Top-k sparse Mixture of Experts feedforward layer."""
+
+    def __init__(self, dim: int, n_experts: int = 8, top_k: int = 2, ffn_expand: int = 4) -> None:
+        super().__init__()
+        self.top_k = top_k
+        self.gate = nn.Linear(dim, n_experts, bias=False)
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, dim * ffn_expand),
+                nn.GELU(),
+                nn.Linear(dim * ffn_expand, dim),
+            )
+            for _ in range(n_experts)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+        flat = x.view(-1, D)                                      # [N, D]
+        scores = self.gate(flat).softmax(-1)                      # [N, E]
+        weights, indices = scores.topk(self.top_k, dim=-1)        # [N, k]
+        weights = weights / weights.sum(-1, keepdim=True)         # normalise
+
+        out = torch.zeros_like(flat)
+        for i, expert in enumerate(self.experts):
+            # which tokens route to expert i (in any top-k slot)
+            token_mask = (indices == i).any(-1)                   # [N]
+            if not token_mask.any():
+                continue
+            # sum the weights for all k slots that point to expert i
+            slot_mask = (indices[token_mask] == i).float()        # [n_sel, k]
+            w = (weights[token_mask] * slot_mask).sum(-1, keepdim=True)  # [n_sel, 1]
+            out[token_mask] += w * expert(flat[token_mask])
+        return out.view(B, L, D)
+
+
+# ---------------------------------------------------------------------------
+# Jamba blocks
+# ---------------------------------------------------------------------------
+
+class JambaSSMBlock(nn.Module):
+    """Pre-norm residual block: Mamba2 SSM + Sparse MoE FFN."""
+
+    def __init__(self, dim: int, d_state: int, d_conv: int, expand: int,
+                 n_experts: int = 8, top_k: int = 2) -> None:
+        super().__init__()
+        self.norm1 = nn.RMSNorm(dim)
+        self.ssm   = Mamba2(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.norm2 = nn.RMSNorm(dim)
+        self.moe   = SparseMoE(dim, n_experts=n_experts, top_k=top_k)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.ssm(self.norm1(x))
+        x = x + self.moe(self.norm2(x))
+        return x
+
+
+class JambaAttentionBlock(nn.Module):
+    """Pre-norm residual block: Multi-head self-attention + Sparse MoE FFN."""
+
+    def __init__(self, dim: int, n_heads: int = 8,
+                 n_experts: int = 8, top_k: int = 2) -> None:
+        super().__init__()
+        self.norm1 = nn.RMSNorm(dim)
+        self.attn  = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        self.norm2 = nn.RMSNorm(dim)
+        self.moe   = SparseMoE(dim, n_experts=n_experts, top_k=top_k)
+
+    def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+        normed = self.norm1(x)
+        attn_out, _ = self.attn(normed, normed, normed, key_padding_mask=key_padding_mask)
+        x = x + attn_out
+        x = x + self.moe(self.norm2(x))
+        return x
+
+
+# ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
@@ -100,7 +180,6 @@ class FineAMT(nn.Module):
 
     def __init__(
         self,
-        blocks: int,
         dim: int,
         n_mels: int = 128,
         label_pitch_dim: int = 128,
@@ -109,6 +188,9 @@ class FineAMT(nn.Module):
         expand: int = 2,
         n_pitches: int = 128,
         max_len: int = 4096,
+        n_heads: int = 8,
+        n_experts: int = 8,
+        top_k: int = 2,
     ) -> None:
         super().__init__()
 
@@ -118,16 +200,15 @@ class FineAMT(nn.Module):
             d_model=dim,
             max_len=max_len,
         )
+        
+        
 
-        self.mamba_blocks = nn.ModuleList([
-            Mamba2(
-                d_model=dim,
-                d_state=d_state,
-                d_conv=d_conv,
-                expand=expand,
-            )
-            for _ in range(blocks)
-        ])
+        ssm_block = lambda: JambaSSMBlock(dim, d_state, d_conv, expand, n_experts, top_k)
+        self.jamba_block = nn.ModuleList(
+            [ssm_block() for _ in range(3)]
+            + [JambaAttentionBlock(dim, n_heads, n_experts, top_k)]
+            + [ssm_block() for _ in range(3)]
+        )
 
         self.norm = nn.LayerNorm(dim)
         self.fine_head       = OutputHead(dim, n_pitches)
@@ -156,12 +237,16 @@ class FineAMT(nn.Module):
         # Project both token types to d_model and add type/pos embeddings
         x = self.embedder(x, type_ids)  # [B, max_len, dim]
 
-        # Zero padding positions before Mamba so they don't pollute state
+        # Zero padding positions before the blocks so they don't pollute state
         padding_mask = (type_ids == -1).unsqueeze(-1)  # [B, max_len, 1]
         x = x.masked_fill(padding_mask, 0.0)
 
-        for block in self.mamba_blocks:
-            x = block(x)
+        padding_bool = (type_ids == -1)  # [B, max_len]  True = pad
+        for block in self.jamba_block:
+            if isinstance(block, JambaAttentionBlock):
+                x = block(x, key_padding_mask=padding_bool)
+            else:
+                x = block(x)
         x = self.norm(x)
 
         beat_mask = (type_ids == 1).unsqueeze(-1)

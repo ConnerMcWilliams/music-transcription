@@ -852,12 +852,14 @@ def main() -> None:
     parser.add_argument("--n_mels",    type=int, default=128,  help="Mel bins in spectrogram")
     parser.add_argument("--dt",        type=float, default=256/16000, help="Seconds per spec frame")
     # Model
-    parser.add_argument("--blocks", type=int, default=8,   help="Mamba2 block count")
-    parser.add_argument("--dim",    type=int, default=384, help="Model d_model")
-    parser.add_argument("--d_state",type=int, default=128)
-    parser.add_argument("--d_conv", type=int, default=4)
-    parser.add_argument("--expand", type=int, default=2)
-    parser.add_argument("--max_len",type=int, default=4096)
+    parser.add_argument("--dim",      type=int, default=384, help="Model d_model")
+    parser.add_argument("--d_state",  type=int, default=128)
+    parser.add_argument("--d_conv",   type=int, default=4)
+    parser.add_argument("--expand",   type=int, default=2)
+    parser.add_argument("--max_len",  type=int, default=4096)
+    parser.add_argument("--n_heads",  type=int, default=8,  help="Attention heads in JambaAttentionBlock")
+    parser.add_argument("--n_experts",type=int, default=8,  help="Number of MoE experts per block")
+    parser.add_argument("--top_k",    type=int, default=2,  help="Top-k experts per token")
     # Training
     parser.add_argument("--epochs",     type=int,   default=30)
     parser.add_argument("--batch_size", type=int,   default=32)
@@ -958,13 +960,15 @@ def main() -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────────
     model = FineAMT(
-        blocks  = args.blocks,
-        dim     = args.dim,
-        n_mels  = args.n_mels,
-        d_state = args.d_state,
-        d_conv  = args.d_conv,
-        expand  = args.expand,
-        max_len = args.max_len,
+        dim       = args.dim,
+        n_mels    = args.n_mels,
+        d_state   = args.d_state,
+        d_conv    = args.d_conv,
+        expand    = args.expand,
+        max_len   = args.max_len,
+        n_heads   = args.n_heads,
+        n_experts = args.n_experts,
+        top_k     = args.top_k,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
