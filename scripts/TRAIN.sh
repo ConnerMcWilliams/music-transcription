@@ -24,6 +24,8 @@ TRAIN_ARGS=(
     --p_flip            0.03
     --lambda_correction 1.0
     --seed              0
+    --wandb_log_checkpoints
+    --wandb_ckpt_alias best
 )
 
 if [ "$NGPUS" = "1" ]; then

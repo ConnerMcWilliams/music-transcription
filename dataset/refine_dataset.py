@@ -55,12 +55,8 @@ class RefineDataset(Dataset):
         self.label_feature_dim = 3 * label_pitch_dim
         self.dt                = dt
 
-        self.spec       = np.load(os.path.join(split_dir, "spec.npy"),       mmap_mode="r")
-        self.midi_on    = np.load(os.path.join(split_dir, "midi_on.npy"),    mmap_mode="r")
-        self.midi_off   = np.load(os.path.join(split_dir, "midi_off.npy"),   mmap_mode="r")
-        self.midi_frame = np.load(os.path.join(split_dir, "midi_frame.npy"), mmap_mode="r")
-        self.ts_target  = np.load(os.path.join(split_dir, "ts_target.npy"),  mmap_mode="r")
-
+        # Index arrays are tiny — load eagerly so __len__ works and worker
+        # processes don't need to re-read them.
         idx = np.load(os.path.join(split_dir, "index.npz"))
         self.spec_start = idx["spec_start"]
         self.spec_end   = idx["spec_end"]
@@ -69,16 +65,38 @@ class RefineDataset(Dataset):
 
         self.max_dim = max(n_mels, 3 * label_pitch_dim)
 
-        if self.spec.shape[1] != n_mels:
+        # Validate the spec column count once in the parent without retaining
+        # the mmap handle: handles are reopened lazily per worker (see
+        # ``_ensure_open``) to avoid segfaults from sharing numpy mmaps
+        # across fork() boundaries.
+        _spec_probe = np.load(os.path.join(split_dir, "spec.npy"), mmap_mode="r")
+        spec_cols = _spec_probe.shape[1]
+        del _spec_probe
+        if spec_cols != n_mels:
             raise ValueError(
-                f"spec.npy has {self.spec.shape[1]} mel bins but RefineDataset was "
+                f"spec.npy has {spec_cols} mel bins but RefineDataset was "
                 f"constructed with n_mels={n_mels}"
             )
+
+        self.spec = self.midi_on = self.midi_off = self.midi_frame = self.ts_target = None
+
+    def _ensure_open(self) -> None:
+        """Open numpy mmaps lazily so each DataLoader worker gets its own
+        file handles — sharing mmaps across fork() can segfault workers."""
+        if self.spec is not None:
+            return
+        d = self.split_dir
+        self.spec       = np.load(os.path.join(d, "spec.npy"),       mmap_mode="r")
+        self.midi_on    = np.load(os.path.join(d, "midi_on.npy"),    mmap_mode="r")
+        self.midi_off   = np.load(os.path.join(d, "midi_off.npy"),   mmap_mode="r")
+        self.midi_frame = np.load(os.path.join(d, "midi_frame.npy"), mmap_mode="r")
+        self.ts_target  = np.load(os.path.join(d, "ts_target.npy"),  mmap_mode="r")
 
     def __len__(self) -> int:
         return int(self.spec_start.shape[0])
 
     def __getitem__(self, index: int) -> Dict[str, object]:
+        self._ensure_open()
         s,  e  = int(self.spec_start[index]), int(self.spec_end[index])
         ms, me = int(self.midi_start[index]), int(self.midi_end[index])
 
